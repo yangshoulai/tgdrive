@@ -26,6 +26,7 @@ from .authn import (
     verify_password,
 )
 from .context import AppContext
+from .archive_staging import ArchiveStaging
 from .filekinds import served_type
 from .errors import (
     IntegrityError,
@@ -45,6 +46,7 @@ from .extract import MAX_VOLUMES, ArchiveService
 from .extract import _content_type as _archive_type
 from .media.service import AssetExists, MediaService
 from .registration import RegistrationService
+from .sevenzip import MIB
 from .settings import SystemSettings
 from .share import ShareAccess
 from .static import StaticFiles
@@ -97,10 +99,15 @@ class TgDriveASGI(StaticFiles):
         # 对外地址也是通行密钥的固定来源，不能由任意请求头决定。
         self.settings = settings or SystemSettings(admin.accounts.metadata, {"public_base_url": public_base_url})
         self.private_space = PrivateSpace(user, self.settings)
-        # 在线解压：任务只在进程内存里，流式读写存储，不落本地磁盘。
+        # 大包在 Telegram 写回时可以借用数据目录的剩余空间暂存输入。
         memory_bytes = resources.detected["memory_bytes"] if resources is not None else None
         archive_memory = (lambda: resources.config()["sevenzip_memory_mib"]) if resources is not None else None
-        self.archives = ArchiveService(user.objects, memory_bytes=memory_bytes, sevenzip_memory_mib=archive_memory)
+        staging = None
+        if resources is not None:
+            remote = getattr(user.objects.engine.store, "writes_to_telegram", None)
+            if remote is not None:
+                staging = ArchiveStaging(resources.data_dir, lambda: resources.config()["reserve_mib"] * MIB, enabled=remote)
+        self.archives = ArchiveService(user.objects, memory_bytes=memory_bytes, sevenzip_memory_mib=archive_memory, staging=staging)
         # 媒体元数据：文件自带的标签、内嵌歌词与字幕，以及可在系统设置中开关的第三方提供者（封面、歌词、字幕）。
         self.media = MediaService(user.objects, admin.accounts.keystore, resources)
         previous_commit = user.objects.on_commit
@@ -173,13 +180,13 @@ class TgDriveASGI(StaticFiles):
                         self.scheduler.start()
                     await send({"type": "lifespan.startup.complete"})
                 elif message["type"] == "lifespan.shutdown":
+                    await self.archives.stop()
                     if self.telegram_bot is not None:
                         await self.telegram_bot.stop()
                     if self.offline is not None:
                         await self.offline.stop()
                     if self.thumbnails is not None:
                         await self.thumbnails.stop()
-                    await self.archives.stop()
                     await self.media.stop()
                     if self.scheduler is not None:
                         await self.scheduler.stop()
@@ -1875,7 +1882,7 @@ class TgDriveASGI(StaticFiles):
             if volumes is not None:
                 if (not isinstance(volumes, list) or not 1 <= len(volumes) <= MAX_VOLUMES
                         or any(not isinstance(part, str) for part in volumes)):
-                    raise ValueError(f"请选择一套 7z 分卷，一次最多 {MAX_VOLUMES} 卷")
+                    raise ValueError(f"请选择一套压缩包分卷，一次最多 {MAX_VOLUMES} 卷")
                 volumes = [user._path(part) for part in volumes]
             return user._path(path), volumes
 

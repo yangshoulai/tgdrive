@@ -293,13 +293,20 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const downloadLimit = () => notify.error("一次最多打包 200 项，请减少选择，或直接下载整个文件夹");
   const selectionStarred = selectedFiles.length > 0 && selectedFiles.every(entry => entry.file.starred_at);
   const selectedAudio = selectedFiles.map(entry => entry.file).filter(file => getFileKind(file.content_type, file.key) === "audio");
-  const volumeBase = api.ARCHIVE_VOLUME_NAME.exec(selectedFiles[0]?.key ?? "")?.[1];
-  const canExtractVolumes = volumeBase !== undefined && selectedFiles.length === selected.size
-    && selectedFiles.every(entry => api.ARCHIVE_VOLUME_NAME.exec(entry.key)?.[1] === volumeBase);
+  const selectedFile = selected.size === 1 ? selectedFiles[0]?.file : undefined;
+  const selectedArchive = selectedFile && isArchive(selectedFile) ? selectedFile : undefined;
+  const selectedVolumes = selectedFiles.map(entry => api.archiveVolumeName(entry.key));
+  const volume = selectedVolumes[0];
+  const canExtractVolumes = Boolean(volume && (volume.part || selectedFiles.length > 1) && selectedFiles.length === selected.size
+    && selectedVolumes.every(part => part?.base === volume.base && part.style === volume.style));
 
-  function extractVolumes() {
+  function extractSelection() {
+    if (selectedArchive) {
+      setExtracting({ file: selectedArchive });
+      return;
+    }
     if (!canExtractVolumes) return;
-    const first = selectedFiles.find(entry => entry.key.endsWith(".001")) ?? selectedFiles[0];
+    const first = selectedFiles.find((_, index) => selectedVolumes[index]?.first) ?? selectedFiles[0];
     setExtracting({ file: first.file, volumes: selectedFiles.map(entry => entry.key) });
   }
 
@@ -441,8 +448,10 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
   const dropClass = (dest: string) => dropTarget === dest ? " is-drop-target" : "";
   function fileMenu(file: api.FileItem): MenuItem[] {
     const entry: Entry = { kind: "file", key: file.key, file };
+    const archive = isArchive(file);
     const items: MenuItem[] = [
       { label: "下载", icon: "download", shortcut: "D", onSelect: () => undefined, href: api.versionedContentUrl(api.contentUrl(file.key, true), file.etag, file.size) },
+      ...(archive ? [{ label: "解压…", icon: "archive" as const, onSelect: () => setExtracting({ file }) }] : []),
       ...cacheMenuItems(cacheQueue, file).filter(item => !item.danger),
       ...(!privateSpace ? [{ label: file.public_token ? "管理分享" : "公开分享", icon: "link" as const, shortcut: "S", onSelect: () => setSharing(file) },
         { label: file.starred_at ? "取消收藏" : "收藏", icon: "star" as const, shortcut: "*", onSelect: () => void star([file], !file.starred_at) }] : []),
@@ -456,8 +465,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     items.push({ label: "重命名", icon: "edit", shortcut: "F2", onSelect: () => setRenaming(entry) });
     items.push({ label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving([entry]) });
     if (getFileKind(file.content_type, file.key) === "image" && !/\.svg$/i.test(file.key)) items.push({ label: "编辑图片…", icon: "crop", onSelect: () => setEditingImage(file) });
-    if (isArchive(file)) items.push({ label: "解压…", icon: "archive", onSelect: () => setExtracting({ file }) });
-    else items.push({ label: "压缩为 ZIP…", icon: "archive", onSelect: () => setCompressing([file.key]) });
+    if (!archive) items.push({ label: "压缩为 ZIP…", icon: "archive", onSelect: () => setCompressing([file.key]) });
     items.push({ label: privateSpace ? "移出到我的文件…" : "移入私密空间…", icon: "lock", onSelect: () => setTransferring([entry]) });
     if (query) items.push({ label: "打开所在文件夹", icon: "folder", onSelect: () => onOpenFolder(parentPath(file.key)) });
     items.push(...cacheMenuItems(cacheQueue, file).filter(item => item.danger));
@@ -646,7 +654,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
       return [
         { label: `下载 ${selected.size} 项（ZIP）`, icon: "download", shortcut: "D", onSelect: selectedEntries.length > 200 ? downloadLimit : () => undefined,
           href: selectedEntries.length > 200 ? undefined : downloadUrl(selectedEntries) },
-        ...(canExtractVolumes ? [{ label: "解压…", icon: "archive" as const, onSelect: extractVolumes }] : []),
+        ...(canExtractVolumes ? [{ label: "解压…", icon: "archive" as const, onSelect: extractSelection }] : []),
         { label: "移动到…", icon: "move", shortcut: "M", onSelect: () => setMoving(selectedEntries) },
         ...(!privateSpace && selectedFiles.length ? [{ label: selectionStarred ? "取消收藏" : `收藏 ${selectedFiles.length} 个文件`, icon: "star" as const, shortcut: "*",
           onSelect: () => void star(selectedFiles.map(entry => entry.file), !selectionStarred) }] : []),
@@ -665,7 +673,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
     "data-key": entry.key,
     onMouseDown: () => setCursor(entry.key),
     onContextMenu: (event: MouseEvent) => {
-      if ((event.target as Element).closest("input, a")) return;
+      if ((event.target as Element).closest("input:not([type=checkbox]), a")) return;
       event.preventDefault();
       setCursor(entry.key);
       setContext({ x: event.clientX, y: event.clientY, key: entry.key });
@@ -711,7 +719,7 @@ export function FilesView({ session, prefix, onOpenFolder, onChanged, uploads, u
           <div className="toolbar-actions">
             {selectedEntries.length > 200 ? <Button size="sm" icon="download" onClick={downloadLimit}>下载</Button>
               : <ButtonLink variant="secondary" size="sm" shortcut="D" icon="download" href={downloadUrl(selectedEntries)}>下载</ButtonLink>}
-            {canExtractVolumes && <Button size="sm" icon="archive" onClick={extractVolumes}>解压…</Button>}
+            {(selectedArchive || canExtractVolumes) && <Button size="sm" icon="archive" onClick={extractSelection}>解压…</Button>}
             {canCacheSelection && <Button size="sm" icon="monitor" onClick={cacheSelected}>缓存到本机</Button>}
             {canClearSelection && <Button size="sm" icon="trash" onClick={clearSelectedCache}>清除本机缓存</Button>}
             {!privateSpace && selectedFiles.length > 0 && <Button size="sm" icon="globe" onClick={() => void bulkPublic(true)}>公开</Button>}

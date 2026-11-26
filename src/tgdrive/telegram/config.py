@@ -173,11 +173,15 @@ class ConfiguredBlobStore(BlobStore):
         store = self._build()
         return {} if store is None else store.pool.snapshot()
 
-    async def put(self, key: str, data: bytes) -> str:
+    def _write_store(self) -> BlobStore:
         store = self._build()
-        if store is None or not store.pool.enabled_ids():
-            return await self.local.put(key, data)
-        return await store.put(key, data)
+        return store if store is not None and store.pool.enabled_ids() else self.local
+
+    def writes_to_telegram(self) -> bool:
+        return self._write_store() is not self.local
+
+    async def put(self, key: str, data: bytes) -> str:
+        return await self._write_store().put(key, data)
 
     async def get(self, ref: str, start: int | None = None, end: int | None = None) -> bytes:
         bot_id = self._telegram_bot_id(ref)

@@ -5,12 +5,16 @@ import { FileGlyph, baseName, getFileKind, parentPath } from "../files";
 import { Button, Checkbox, Field, Icon, KeyValue, Modal, Notice, PasswordField, Progress, Segmented, Switch, formatBytes, toast } from "../ui";
 import { FolderPicker } from "./folders";
 
-const archiveLabel = (key: string) => baseName(api.ARCHIVE_VOLUME_NAME.exec(key)?.[1] ?? key);
+const archiveLabel = (key: string) => {
+  const volume = api.archiveVolumeName(key);
+  return baseName(volume?.part ? volume.base : key);
+};
 /** 压缩包名去掉扩展名，作为「解压到同名文件夹」的名称。 */
 export function archiveBase(key: string) {
   return archiveLabel(key).replace(api.ARCHIVE_NAME, "") || "解压结果";
 }
-export const isArchive = (file: api.FileItem) => api.ARCHIVE_NAME.test(file.key);
+export const isArchive = (file: api.FileItem) => api.ARCHIVE_NAME.test(file.key) && !api.archiveVolumeName(file.key)?.part;
+const usesDecoder = (format?: string) => format === "7z" || format === "rar";
 
 const ACTIVE = new Set(["queued", "running"]);
 const watched = new Set<string>();
@@ -194,9 +198,9 @@ export function ExtractDialog({ file, picks, volumes, onClose, onOpenFolder }: {
   const need = info?.total_bytes == null ? null : partial ? selectedBytes
     : Math.max(0, info.total_bytes - (conflict === "skip" || conflict === "overwrite" ? info.conflict_bytes ?? 0 : 0));
   const short = need !== null && info?.room != null && need > info.room;
-  const sevenZip = info?.format === "7z";
+  const optionalPassword = usesDecoder(info?.format);
   const needsPassword = listing ? listing.some(entry => entry.encrypted && !entry.dir && selected.has(entry.name)) : Boolean(info?.encrypted);
-  const showPassword = sevenZip || needsPassword;
+  const showPassword = optionalPassword || needsPassword;
   async function start() {
     if (busy || loading || !info || short || place === "other" && !otherReady) return;
     if (listing && !selected.size) { setError("请至少选择一个文件"); return; }
@@ -216,7 +220,11 @@ export function ExtractDialog({ file, picks, volumes, onClose, onOpenFolder }: {
   if (job) {
     const active = ACTIVE.has(job.status);
     const retryPassword = job.status === "failed" && job.password_error;
-    const percent = job.total_bytes ? job.done_bytes / job.total_bytes * 100 : job.archive_size ? job.read_bytes / job.archive_size * 100 : 0;
+    const inputPercent = job.archive_size ? job.read_bytes / job.archive_size * 100 : 0;
+    const percent = !job.staging && job.total_bytes ? job.done_bytes / job.total_bytes * 100 : inputPercent;
+    const progressMessage = job.status === "queued" ? "排队中…" : job.staging
+      ? `正在准备压缩包… ${formatBytes(job.read_bytes)} / ${formatBytes(job.archive_size)}`
+      : job.current ? `正在解压并写回 ${job.current}` : "正在读取压缩包…";
     const title = job.status === "completed" ? job.failed ? "解压完成，部分文件失败" : "解压完成" : job.status === "failed" ? "解压失败" : job.status === "cancelled" ? "已取消解压" : "正在解压";
     return <Modal title={title} icon="archive" description={name} onClose={close} dismissible={!active}
       footer={active ? <><Button onClick={() => void api.cancelArchiveJob(job.id, job.private).then(setJob, reason => toast.error(api.errorMessage(reason, "取消失败")))}>取消解压</Button><Button variant="primary" onClick={close}>后台运行</Button></>
@@ -224,8 +232,8 @@ export function ExtractDialog({ file, picks, volumes, onClose, onOpenFolder }: {
           <Button variant={retryPassword ? "secondary" : "primary"} onClick={onClose}>完成</Button>
           {retryPassword && <Button variant="primary" onClick={() => { setPasswordError(job.error); setJob(null); }}>重新输入密码</Button>}</>}>
       <div className="extract-progress">
-        {active && (job.format === "7z" ? <div className="task-unknown is-running" role="progressbar" aria-label="解压进度" /> : <Progress value={percent} label="解压进度" />)}
-        {active && <p className="muted extract-current" title={job.current}>{job.status === "queued" ? "排队中…" : job.current ? `正在解压 ${job.current}` : "正在读取压缩包…"}</p>}
+        {active && (usesDecoder(job.format) && !job.staging ? <div className="task-unknown is-running" role="progressbar" aria-label="解压进度" /> : <Progress value={percent} label="解压进度" />)}
+        {active && <p className="muted extract-current" title={progressMessage}>{progressMessage}</p>}
         {job.error && <Notice tone="danger">{job.error}</Notice>}
         <KeyValue items={[
           ["已解出", `${job.done_files}${job.total_files != null ? ` / ${job.total_files}` : ""} 个文件 · ${formatBytes(job.done_bytes)}${job.total_bytes ? ` / ${formatBytes(job.total_bytes)}` : ""}`],
@@ -251,7 +259,7 @@ export function ExtractDialog({ file, picks, volumes, onClose, onOpenFolder }: {
       {!info && !error && <p className="muted" role="status">{volumes ? "正在检查分卷…" : "正在读取压缩包…"}</p>}
       {info && <>
         <KeyValue items={[
-          ["格式", volumes ? "7z 分卷" : sevenZip ? "7z" : info.format.toUpperCase()],
+          ["格式", `${info.format === "7z" ? "7z" : info.format.toUpperCase()}${volumes ? " 分卷" : ""}`],
           volumes ? ["已选分卷", `${volumes.length.toLocaleString()} 卷 · ${formatBytes(info.size)}`]
             : ["内容", info.listable ? `${info.files} 个文件 · 解压后 ${formatBytes(info.total_bytes)}` : info.single_name ? `1 个文件：${info.single_name}` : "解压时统计文件数与大小"],
           ["可用空间", info.room == null ? "不限" : formatBytes(Math.max(0, info.room))],
@@ -267,7 +275,7 @@ export function ExtractDialog({ file, picks, volumes, onClose, onOpenFolder }: {
         }}>
           <PasswordField label="压缩包密码" value={password} autoComplete="off" disabled={busy}
             autoFocus={needsPassword || Boolean(passwordError)} error={passwordError}
-            hint={sevenZip ? "加密压缩包请填写" : info.encryption === "aes" ? "AES 加密" : "传统 ZIP 加密"}
+            hint={optionalPassword ? "加密压缩包请填写" : info.encryption === "aes" ? "AES 加密" : "传统 ZIP 加密"}
             onChange={value => { setPassword(value); setPasswordError(""); }} />
         </div>}
         <Field label="解压到">
@@ -283,7 +291,7 @@ export function ExtractDialog({ file, picks, volumes, onClose, onOpenFolder }: {
         {volumes ? <p className="muted">解压后保留全部分卷。</p>
           : <Switch checked={keep || partial} onChange={setKeep} disabled={partial} label="解压后保留压缩包"
             description={partial ? "只解压部分文件时总是保留压缩包，其余文件以后还能解压。" : keep ? "压缩包原样保留。" : "全部文件成功解出后，压缩包移到回收站，可以还原；有文件失败时保留。"} />}
-        <p className="muted">解压在服务器上进行，直接写入文件空间，不占用本机磁盘；关闭窗口后继续在后台运行。</p>
+        <p className="muted">解压由服务器处理。关闭窗口后，任务会继续在后台运行。</p>
       </>}
     </div>
   </Modal>;

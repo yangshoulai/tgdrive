@@ -1169,7 +1169,7 @@ CREATE INDEX assistant_calls_by_user ON assistant_calls(user_id, started_at DESC
 
 **8. 复制、解压与压缩工具**
 - `propose_copy`（操作类型 `copy`）：条目同 `propose_move`（冻结源版本与目标），冲突默认 `suffix`；执行用 `ObjectService.link_copy` 引用同一个 Blob，文件夹逐项复制并补目录标记，目标已有同名文件时自动改名；撤销删除本次创建的副本（`created`，复核 ETag）与新建的空目录。私密空间内可用（源与目标都在私密空间）。
-- `propose_extract`（`extract`）／`propose_compress`（`compress`）：执行器经 `executor.archives`（`asgi.py` 注入的 `ArchiveService`）启动与网页相同的解压／压缩任务并等待结束，共用全站 2 路、每人 5 个的限制；用户取消操作时一并取消任务。解压不可撤销，压缩可撤销（删除生成的 ZIP）。有密码的 ZIP 或 7z 跳过并提示到文件页输入密码——密码不经过模型。两者在私密空间不可用（`PRIVATE` 为 na）。回归 `tests/test_assistant_archive_tools.py`。
+- `propose_extract`（`extract`）／`propose_compress`（`compress`）：执行器经 `executor.archives`（`asgi.py` 注入的 `ArchiveService`）启动与网页相同的解压／压缩任务并等待结束，共用全站 2 路、每人 5 个的限制；用户取消操作时一并取消任务。解压不可撤销，压缩可撤销（删除生成的 ZIP）。有密码的 ZIP、7z 或 RAR 跳过并提示到文件页输入密码——密码不经过模型。两者在私密空间不可用（`PRIVATE` 为 na）。回归 `tests/test_assistant_archive_tools.py`。
 
 ## 24. 私密对话（一至三期已实现；对话形态已由 §37 统一对话替代）
 

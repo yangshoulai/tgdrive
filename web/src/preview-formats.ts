@@ -1,6 +1,6 @@
 /** 在文件类型（FileKind）之下细分的预览格式：同是文本，CSV 用表格、JSON／YAML 用结构视图、Notebook 按单元格显示；
  * 字体、电子书与压缩包各有自己的查看器。只按扩展名与 MIME 判断，不改变文件类型（类型筛选与服务端规则不受影响）。 */
-import { ARCHIVE_NAME, ARCHIVE_VOLUME_NAME } from "./api";
+import { ARCHIVE_NAME, archiveVolumeName } from "./api";
 import type { FileKind } from "./files";
 
 /** 文本类的视图：markdown 渲染、table 表格、tree 结构、notebook 单元格；null 为纯文本／代码。 */
@@ -21,7 +21,7 @@ export function fileFormatOf(kind: FileKind, name: string, type?: string | null)
   if (kind === "image" && (/\.(heic|heif)$/.test(lower) || mime === "image/heic" || mime === "image/heif")) return "heic";
   if (/\.(ttf|otf|woff2?|ttc)$/.test(lower) || mime.startsWith("font/") || mime === "application/font-woff" || mime === "application/x-font-ttf") return "font";
   if (/\.epub$/.test(lower) || mime === "application/epub+zip") return "epub";
-  if (kind === "archive" && !ARCHIVE_VOLUME_NAME.test(name)
-    && (ARCHIVE_NAME.test(name) || /zip|x-tar|gzip|bzip2|x-xz|x-7z-compressed/.test(mime))) return "archive";
+  if (kind === "archive" && !archiveVolumeName(name)?.part
+    && (ARCHIVE_NAME.test(name) || /zip|x-tar|gzip|bzip2|x-xz|x-7z-compressed|(?:vnd\.|x-)rar/.test(mime))) return "archive";
   return null;
 }

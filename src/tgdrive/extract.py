@@ -1,12 +1,13 @@
 """在线解压：把存储里的压缩包解到同一账号的文件空间。
 
-全程流式，不写本地临时文件：按字节范围从存储读取压缩包 → 内存中解密、解压 → 直接写回存储（put_object），
-所以服务器本机磁盘大小不受影响，只受账号配额限制（开始前按解压后大小检查）。
+从存储读取压缩包，在有界内存中解密、解压并逐文件写回存储。磁盘空间充足时可加密暂存较大的压缩输入，
+便于随机读取；解压后的内容始终直接写回存储。写入时检查账号配额，ZIP 可在开始前估算空间。
 
 - ZIP：读中央目录得到全部条目（支持 ZIP64、UTF-8／GBK 文件名、存储／Deflate／BZip2／LZMA），每个条目是一段连续字节，
   单独按范围读取；支持传统 ZipCrypto 与 WinZip AES 密码。
 - TAR（含 .tar.gz／.tgz／.tar.bz2／.tar.xz）：顺序读一遍；单个 .gz／.bz2／.xz 文件解出一个文件。
 - 7z 单包和分卷：按字节范围读取，由独立进程逐条解码，使用 libarchive 或支持 AES 的 py7zr。
+- RAR 单包和分卷：独立进程用 7-Zip 按卷读取并解码 RAR4／RAR5，支持密码。
 
 任务只在进程内存里（重启后丢失，已解出的文件保留）；密码只在任务运行期间留在内存，不写日志、审计或接口回显。
 """
@@ -15,10 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import bz2
-import logging
+import errno
 import hashlib
 import hmac
 import lzma
+import logging
 import re
 import secrets
 import struct
@@ -28,35 +30,52 @@ import unicodedata
 import zlib
 from bisect import bisect_right
 from collections import OrderedDict
-from contextlib import aclosing, asynccontextmanager
-from dataclasses import dataclass, field, replace
+from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing, asynccontextmanager, nullcontext
+from dataclasses import dataclass, field
 from itertools import accumulate
-from typing import AsyncIterator, Callable
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from .archive import stream_zip
-from .errors import NotFoundError, QuotaExceededError
-from .objects import PRIVATE_PREFIX, ObjectService, Scope
-from .sevenzip import SevenZipError, decoder_memory_budget, decoder_memory_limit, open_decoder
+from .archive_staging import FRAME_SIZE, ArchiveStaging, StagedArchive, StagingUnavailable
+from .errors import IntegrityError, NotFoundError, NotReadyError, QuotaExceededError, StorageAccessError
+from .objects import ObjectService, Scope
+from .sevenzip import (
+    DEFAULT_MEMORY_LIMIT,
+    MIB,
+    RAR_SIGNATURES,
+    DecoderError,
+    decoder_memory_budget,
+    decoder_memory_limit,
+    open_decoder,
+)
+from .telegram.client import TelegramError, TelegramRateLimitError
+from .work import WorkBusyError
 
 log = logging.getLogger(__name__)
 
 MAX_ZIP_ENTRIES = 50_000      # ZIP 需要在主进程列出可选择的条目
 MAX_CENTRAL = 64 * 1024 * 1024  # 中央目录最大字节数
 CHUNK = 1024 * 1024           # 解压输出分块
+STAGE_MIN_SIZE = 64 * MIB      # 小包按需读，避免为几次范围读取付出整包暂存开销
+MAX_TAR_METADATA = 4 * MIB    # GNU 长名和 PAX 元数据读入内存解析，文件内容无此限制
 MAX_VOLUMES = 1000            # 限制一次预检读取的对象元数据量
-SEVEN_ZIP_WINDOW = 4 * 1024 * 1024
+READ_WINDOW = 4 * 1024 * 1024
+ARCHIVE_READ_BATCH = 8 * MIB   # 接近 Telegram 的读取窗口，写回期间让出读取名额
 SEVEN_ZIP_SIGNATURE = b"7z\xbc\xaf\x27\x1c"
 SEVEN_ZIP_VOLUME = re.compile(r"(.*\.7z)\.[0-9]{3,}\Z", re.IGNORECASE)
+RAR_NUMBERED_VOLUME = re.compile(r"(.*)\.part([0-9]+)\.rar\Z", re.IGNORECASE)
+RAR_LEGACY_VOLUME = re.compile(r"(.*)\.(rar|[r-z][0-9]{2})\Z", re.IGNORECASE)
 SAMPLE = 500                  # 预览列出的条目数
 JOB_KEEP = 3600               # 已结束任务保留时间（秒）
 DIRECTORY_CACHE = 8           # 在线浏览时缓存的中央目录个数
 DIRECTORY_TTL = 600           # 缓存的中央目录保留时间（秒）
 JOBS_PER_USER = 50
 RUNNING = 2                   # 全站同时进行的解压任务数
-ARCHIVE_TYPES = re.compile(r"\.(zip|7z|tar|tgz|tbz2?|txz|tar\.(?:gz|bz2|xz)|gz|bz2|xz)$", re.IGNORECASE)
-UNSUPPORTED = re.compile(r"\.(rar|zst|tar\.zst|iso|cab|arj|lzh)$", re.IGNORECASE)
+DECODER_FORMATS = ("7z", "rar")
+ARCHIVE_TYPES = re.compile(r"\.(zip|7z|rar|tar|tgz|tbz2?|txz|tar\.(?:gz|bz2|xz)|gz|bz2|xz)$", re.IGNORECASE)
+UNSUPPORTED = re.compile(r"\.(zst|tar\.zst|iso|cab|arj|lzh)$", re.IGNORECASE)
 CONFLICTS = ("skip", "overwrite", "rename")
 
 
@@ -68,6 +87,39 @@ class PasswordRequired(ArchiveError):
     pass
 
 
+class ArchiveReadError(ArchiveError):
+    pass
+
+
+class ArchiveWriteError(ArchiveError):
+    pass
+
+
+STORAGE_ERRORS = (NotFoundError, IntegrityError, NotReadyError, StorageAccessError, WorkBusyError, TelegramError, OSError)
+
+
+def _storage_failure(exc: Exception, action: str) -> str:
+    if isinstance(exc, WorkBusyError):
+        return f"{action}失败：等待读取或传输名额超时，请稍后重试"
+    if isinstance(exc, TelegramRateLimitError):
+        return f"{action}失败：Telegram 限流，请稍后重试"
+    if isinstance(exc, TelegramError):
+        return f"{action}失败：Telegram 存储暂不可用，请稍后重试"
+    if isinstance(exc, StorageAccessError):
+        return f"{action}失败：存储通道拒绝访问，请联系管理员检查权限"
+    if isinstance(exc, NotReadyError):
+        return f"{action}失败：系统已锁定或存储通道不可用"
+    if isinstance(exc, NotFoundError):
+        return f"{action}失败：文件已移动、删除或有存储分片缺失"
+    if isinstance(exc, IntegrityError):
+        return f"{action}失败：存储分片校验未通过"
+    if isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT):
+        return f"{action}失败：服务器磁盘空间不足"
+    if isinstance(exc, TimeoutError):
+        return f"{action}超时，请稍后重试"
+    return f"{action}失败：存储读写异常，请稍后重试"
+
+
 # ---------- 读取存储里的压缩包 ----------
 
 class Source:
@@ -75,53 +127,90 @@ class Source:
 
     def __init__(self, objects: ObjectService, scope: Scope, key: str, etag: str, size: int, on_read: Callable[[int], None] | None = None):
         self.objects, self.scope, self.key, self.etag, self.size, self.on_read = objects, scope, key, etag, size, on_read
+        self.staged: StagedArchive | None = None
 
     async def stream(self, start: int, end: int) -> AsyncIterator[bytes]:
         if self.scope.authorize is not None:
             self.scope.authorize()
-        info, body = await self.objects.get_object(self.scope, self.key, start, end)
-        if info.etag != self.etag:
-            await body.aclose()
-            raise ArchiveError("压缩包已被修改，请重新开始解压")
         try:
-            async for chunk in body:
-                if self.scope.authorize is not None:
-                    self.scope.authorize()
-                if self.on_read:
-                    self.on_read(len(chunk))
-                yield chunk
-        finally:
-            await body.aclose()
+            if self.staged is not None:
+                body = self.staged.stream(start, end)
+            else:
+                info, body = await self.objects.get_object(self.scope, self.key, start, end)
+                if info.etag != self.etag:
+                    await body.aclose()
+                    raise ArchiveReadError("压缩包已被修改，请重新开始解压")
+            remaining = end - start
+            async with aclosing(body):
+                async for chunk in body:
+                    if self.scope.authorize is not None:
+                        self.scope.authorize()
+                    remaining -= len(chunk)
+                    if remaining < 0:
+                        raise ArchiveReadError("读取到的压缩包大小与记录不符")
+                    if self.on_read:
+                        self.on_read(len(chunk))
+                    yield chunk
+            if remaining:
+                raise ArchiveReadError("压缩包读取不完整，请检查存储通道后重试")
+        except PermissionError:
+            raise
+        except StagingUnavailable:
+            raise ArchiveReadError("读取解压暂存失败，请稍后重试") from None
+        except STORAGE_ERRORS as exc:
+            action = "读取解压暂存" if self.staged is not None else "读取压缩包"
+            raise ArchiveReadError(_storage_failure(exc, action)) from None
 
     async def read(self, start: int, end: int) -> bytes:
-        parts = [chunk async for chunk in self.stream(start, end)]
-        return b"".join(parts)
+        return b"".join([chunk async for chunk in self.stream(start, end)])
+
+    async def batches(self, start: int, end: int) -> AsyncIterator[bytes]:
+        """每批读完先归还读取名额，解压或上传慢时其他任务仍可读取。"""
+        if self.staged is not None:
+            async with aclosing(self.stream(start, end)) as stream:
+                async for chunk in stream:
+                    yield chunk
+            return
+        while start < end:
+            stop = min(end, start + ARCHIVE_READ_BATCH)
+            yield await self.read(start, stop)
+            start = stop
+
+    def check_version(self, label: str = "压缩包") -> None:
+        try:
+            info = self.objects.head_object(self.scope, self.key)
+        except NotFoundError:
+            raise ArchiveReadError(f"{label}已移动或删除，请重新选择后解压") from None
+        if info.etag != self.etag or info.size != self.size:
+            raise ArchiveReadError(f"{label}已被修改，请重新选择后解压")
 
 
-class SevenZipSource:
-    """把单包或一组分卷映射到同一字节地址空间，只缓存最近读过的窗口。"""
+class VolumeSource:
+    """把所选对象映射到同一字节地址空间，只缓存最近读过的窗口。"""
 
-    def __init__(self, parts: list[Source], *, split: bool = False):
+    def __init__(self, parts: list[Source], kind: str, *, split: bool = False):
         self.parts = parts
+        self.format = kind
         self.label = "分卷" if split else "压缩包"
         self.keys = frozenset(part.key for part in parts)
         self.ends = list(accumulate(part.size for part in parts))
         self.size = self.ends[-1]
         self.window_start, self.window = 0, b""
+        self.staged: StagedArchive | None = None
 
-    async def read(self, start: int, end: int, *, window: int = SEVEN_ZIP_WINDOW) -> bytes:
+    async def read(self, start: int, end: int, *, window: int = READ_WINDOW) -> bytes:
+        if self.staged is not None:
+            try:
+                return await self.staged.read(start, end)
+            except (OSError, IntegrityError, StagingUnavailable):
+                raise ArchiveReadError("读取解压暂存失败，请稍后重试") from None
         pieces = []
         while start < end:
             if not self.window_start <= start < self.window_start + len(self.window):
                 index = bisect_right(self.ends, start)
                 volume_start = self.ends[index - 1] if index else 0
                 stop = min(self.ends[index], start + window)
-                try:
-                    self.window = await self.parts[index].read(start - volume_start, stop - volume_start)
-                except NotFoundError:
-                    raise ArchiveError(f"{self.label}已移动或删除，请重新选择后解压") from None
-                if len(self.window) != stop - start:
-                    raise ArchiveError(f"{self.label}数据不完整，请检查压缩包")
+                self.window = await self.parts[index].read(start - volume_start, stop - volume_start)
                 self.window_start = start
             stop = min(end, self.window_start + len(self.window))
             pieces.append(self.window[start - self.window_start:stop - self.window_start])
@@ -130,12 +219,7 @@ class SevenZipSource:
 
     def check_versions(self) -> None:
         for part in self.parts:
-            try:
-                info = part.objects.head_object(part.scope, part.key)
-            except NotFoundError:
-                raise ArchiveError(f"{self.label}已移动或删除，请重新选择后解压") from None
-            if info.etag != part.etag or info.size != part.size:
-                raise ArchiveError(f"{self.label}已被修改，请重新选择后解压")
+            part.check_version(self.label)
 
 
 class Reader:
@@ -176,6 +260,11 @@ class Reader:
         closer = getattr(self.chunks, "aclose", None)
         if closer:
             await closer()
+
+    async def drain(self) -> None:
+        self.buffer.clear()
+        async for _ in self.chunks:
+            pass
 
 
 # ---------- 解密 ----------
@@ -363,7 +452,36 @@ def _decompressor(method: int):
     raise ArchiveError(f"不支持的压缩方式（{method}）")
 
 
-async def zip_entry_stream(source: Source, entry: ZipEntry, password: bytes | None) -> AsyncIterator[bytes]:
+async def _inflate(decoder, data: bytes) -> AsyncIterator[bytes]:
+    """每次只展开一个输出块，输出送走以后再继续处理已经接收的压缩数据。"""
+    if decoder is None:
+        if data:
+            yield data
+        return
+    zlib_stream = hasattr(decoder, "unconsumed_tail")
+    while not decoder.eof:
+        try:
+            output = await asyncio.to_thread(decoder.decompress, data, CHUNK)
+        except lzma.LZMAError as exc:
+            if "Memory usage limit exceeded" in str(exc):
+                raise ArchiveError("XZ 解码内存不足，请联系管理员调整解压内存上限") from None
+            raise ArchiveError("压缩流校验失败，数据可能已损坏") from None
+        except (zlib.error, OSError, EOFError):
+            raise ArchiveError("压缩流校验失败，数据可能已损坏") from None
+        if output:
+            yield output
+        if zlib_stream:
+            data = decoder.unconsumed_tail
+            if not data and len(output) < CHUNK:
+                break
+        elif decoder.needs_input:
+            break
+        else:
+            data = b""
+
+
+async def zip_entry_stream(source: Source, entry: ZipEntry, password: bytes | None, *,
+                           memory_limit: int = DEFAULT_MEMORY_LIMIT, batch_reads: bool = False) -> AsyncIterator[bytes]:
     """一个 ZIP 条目的解压内容；结束时校验 CRC／HMAC 与大小。"""
     header = await source.read(entry.offset, min(source.size, entry.offset + 30))
     if header[:4] != b"PK\x03\x04" or len(header) < 30:
@@ -376,7 +494,7 @@ async def zip_entry_stream(source: Source, entry: ZipEntry, password: bytes | No
     method = entry.aes[1] if entry.aes else entry.method
     if method not in METHODS:
         raise ArchiveError(f"不支持的压缩方式（{method}）")
-    reader = Reader(source.stream(start, end))
+    reader = Reader(source.batches(start, end) if batch_reads else source.stream(start, end))
     remaining = entry.compressed
     try:
         decrypt = None
@@ -406,40 +524,46 @@ async def zip_entry_stream(source: Source, entry: ZipEntry, password: bytes | No
                 remaining -= 12
             if remaining < 0:
                 raise ArchiveError("压缩包条目已损坏")
-        decompressor = _decompressor(method) if method != 14 else None
-        lzma_ready = method != 14
+        async def decoded(data: bytes) -> bytes:
+            if decrypt is None:
+                return data
+            return await asyncio.to_thread(decrypt, data) if slow or len(data) > 65536 else decrypt(data)
+
+        if method == 14:
+            # LZMA 属性可能跨压缩流的缓冲边界，按长度分别取完。
+            if remaining < 4:
+                raise ArchiveError("LZMA 条目头无效")
+            header = await decoded(await reader.exactly(4))
+            (props_length,) = struct.unpack_from("<H", header, 2)
+            if props_length != 5 or props_length > remaining - 4:
+                raise ArchiveError("LZMA 条目头无效")
+            props = await decoded(await reader.exactly(props_length))
+            remaining -= 4 + props_length
+            try:
+                lzma_filter = lzma._decode_filter_properties(lzma.FILTER_LZMA1, props)
+            except lzma.LZMAError:
+                raise ArchiveError("LZMA 条目头无效") from None
+            if lzma_filter["dict_size"] + 8 * MIB > memory_limit:
+                raise ArchiveError("ZIP 的 LZMA 字典超过解码内存上限，请联系管理员调整")
+            decompressor = lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[lzma_filter])
+        else:
+            decompressor = _decompressor(method)
         crc, produced = 0, 0
         while remaining > 0:
             data = await reader.some(min(CHUNK, remaining))
             if not data:
                 raise ArchiveError("压缩包不完整或已损坏")
             remaining -= len(data)
-            if decrypt is not None:
-                data = await asyncio.to_thread(decrypt, data) if slow or len(data) > 65536 else decrypt(data)
-            if not lzma_ready:
-                # ZIP 里的 LZMA：2 字节版本、2 字节属性长度、属性，之后是原始 LZMA1 数据。
-                if len(data) < 4:
-                    raise ArchiveError("LZMA 条目头无效")
-                (props_length,) = struct.unpack_from("<H", data, 2)
-                props = data[4:4 + props_length]
-                decompressor = lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[lzma._decode_filter_properties(lzma.FILTER_LZMA1, props)])
-                data, lzma_ready = data[4 + props_length:], True
-            output = data if decompressor is None else await asyncio.to_thread(decompressor.decompress, data)
-            if output:
+            data = await decoded(data)
+            async for output in _inflate(decompressor, data):
                 produced += len(output)
                 if produced > entry.size:
                     raise ArchiveError("解压后的大小与记录不符，已停止（可能是压缩炸弹或文件损坏）")
                 crc = zlib.crc32(output, crc)
-                for index in range(0, len(output), CHUNK):
-                    yield output[index:index + CHUNK]
-        if method == 8:
-            tail = decompressor.flush()
-            if tail:
-                produced += len(tail)
-                if produced > entry.size:
-                    raise ArchiveError("解压后的大小与记录不符，已停止（可能是压缩炸弹或文件损坏）")
-                crc = zlib.crc32(tail, crc)
-                yield tail
+                yield output
+        # ZIP 的 LZMA 可以省略结束标记，此时由声明长度和 CRC／HMAC 校验。
+        if decompressor is not None and (method != 14 or entry.flags & 0x02) and not decompressor.eof:
+            raise ArchiveError("ZIP 压缩流不完整，文件可能已损坏")
         if aes is not None:
             aes.verify(await reader.exactly(10))
         if produced != entry.size:
@@ -451,12 +575,13 @@ async def zip_entry_stream(source: Source, entry: ZipEntry, password: bytes | No
         await reader.close()
 
 
-async def check_zip_password(source: Source, entries: list[ZipEntry], password: bytes) -> bool:
+async def check_zip_password(source: Source, entries: list[ZipEntry], password: bytes, *,
+                             memory_limit: int = DEFAULT_MEMORY_LIMIT) -> bool:
     """只检查第一个加密条目的密码校验字节（AES 为派生的校验值，传统加密为解密后的头部），不解出内容。"""
     entry = next((item for item in entries if item.encrypted and not item.is_dir), None)
     if entry is None:
         return True
-    stream = zip_entry_stream(source, entry, password)
+    stream = zip_entry_stream(source, entry, password, memory_limit=memory_limit)
     try:
         await anext(stream, None)
         return True
@@ -472,35 +597,43 @@ async def check_zip_password(source: Source, entries: list[ZipEntry], password: 
 
 # ---------- TAR 与单文件压缩 ----------
 
-def _stream_decompressor(kind: str):
+def _stream_decompressor(kind: str, memory_limit: int):
     if kind == "gz":
         return zlib.decompressobj(31)
     if kind == "bz2":
         return bz2.BZ2Decompressor()
     if kind == "xz":
-        return lzma.LZMADecompressor()
-    return None
+        return lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=memory_limit)
+    raise ValueError("不支持的流式压缩格式")
 
 
-async def decompressed(chunks: AsyncIterator[bytes], kind: str) -> AsyncIterator[bytes]:
-    decompressor = _stream_decompressor(kind)
-    if decompressor is None:
-        async for chunk in chunks:
-            yield chunk
-        return
-    async for chunk in chunks:
-        while chunk:
-            output = await asyncio.to_thread(decompressor.decompress, chunk)
-            chunk = b""
-            if output:
-                yield output
-            # gzip 可能由多段拼接：一段结束后继续解剩下的数据。
-            if kind == "gz" and decompressor.eof and decompressor.unused_data:
-                chunk, decompressor = decompressor.unused_data, zlib.decompressobj(31)
-    if kind == "gz":
-        tail = decompressor.flush()
-        if tail:
-            yield tail
+async def decompressed(chunks: AsyncIterator[bytes], kind: str, *,
+                       memory_limit: int = DEFAULT_MEMORY_LIMIT) -> AsyncIterator[bytes]:
+    decoder = None
+    complete = False
+    padding = 0
+    async with aclosing(chunks):
+        async for data in chunks:
+            while data:
+                if decoder is None:
+                    if complete and kind in ("gz", "xz"):
+                        stripped = data.lstrip(b"\0")
+                        padding += len(data) - len(stripped)
+                        data = stripped
+                        if not data:
+                            break
+                        if kind == "xz" and padding % 4:
+                            raise ArchiveError("XZ 压缩流的填充无效")
+                        padding = 0
+                    decoder = _stream_decompressor(kind, memory_limit)
+                async for output in _inflate(decoder, data):
+                    yield output
+                if not decoder.eof:
+                    break
+                # 拼接的 gzip、bzip2 和 XZ 每段分别校验并继续解码。
+                complete, data, decoder = True, decoder.unused_data, None
+    if not complete or decoder is not None or kind == "xz" and padding % 4:
+        raise ArchiveError("压缩流不完整，文件可能已损坏")
 
 
 @dataclass
@@ -556,6 +689,8 @@ async def tar_members(reader: Reader) -> AsyncIterator[tuple[TarMember, Callable
         full = (prefix + b"/" + name) if prefix else name
         padded = (size + 511) // 512 * 512
         if kind_flag in (b"L", b"x", b"g"):
+            if size > MAX_TAR_METADATA:
+                raise ArchiveError("TAR 文件名或扩展头超过解析上限")
             data = (await reader.exactly(padded))[:size]
             if kind_flag == b"L":
                 long_name = data.split(b"\0", 1)[0]
@@ -605,8 +740,8 @@ def archive_format(name: str, head: bytes) -> str:
         return "zip"
     if head.startswith(SEVEN_ZIP_SIGNATURE):
         return "7z"
-    if head.startswith(b"Rar!\x1a\x07"):
-        raise ArchiveError("暂不支持 RAR 格式")
+    if head.startswith(RAR_SIGNATURES):
+        return "rar"
     if len(head) >= 262 and head[257:262] == b"ustar":
         return "tar"
     compressed = "gz" if head[:2] == b"\x1f\x8b" else "bz2" if head[:3] == b"BZh" else "xz" if head[:6] == b"\xfd7zXZ\0" else None
@@ -617,9 +752,11 @@ def archive_format(name: str, head: bytes) -> str:
         raise ArchiveError("不是有效的 ZIP 压缩包")
     if lower.endswith(".7z"):
         raise ArchiveError("不是有效的 7z 压缩包")
+    if RAR_LEGACY_VOLUME.fullmatch(name):
+        raise ArchiveError("不是有效的 RAR 压缩包")
     if UNSUPPORTED.search(lower):
-        raise ArchiveError("暂不支持这种压缩格式，可在线解压 ZIP、7z、TAR 及单个 .gz、.bz2、.xz 文件")
-    raise ArchiveError("无法识别压缩格式，可在线解压 ZIP、7z、TAR 及单个 .gz、.bz2、.xz 文件")
+        raise ArchiveError("暂不支持这种压缩格式，可在线解压 ZIP、7z、RAR、TAR 及单个 .gz、.bz2、.xz 文件")
+    raise ArchiveError("无法识别压缩格式，可在线解压 ZIP、7z、RAR、TAR 及单个 .gz、.bz2、.xz 文件")
 
 
 def check_7z_header(head: bytes, size: int, *, split: bool = False) -> None:
@@ -629,6 +766,53 @@ def check_7z_header(head: bytes, size: int, *, split: bool = False) -> None:
     offset, length = struct.unpack_from("<QQ", head, 12)
     if size < 32 + offset + length:
         raise ArchiveError("7z 分卷不完整，请选齐所有分卷后再试" if split else "7z 压缩包不完整，请检查文件")
+
+
+def rar_volume(path: str) -> tuple[str, str, int] | None:
+    if match := RAR_NUMBERED_VOLUME.fullmatch(path):
+        digits = match[2].lstrip("0")
+        return "numbered", match[1], int(digits or "0") if len(digits) <= 4 else MAX_VOLUMES + 1
+    if match := RAR_LEGACY_VOLUME.fullmatch(path):
+        suffix = match[2].lower()
+        number = 1 if suffix == "rar" else (ord(suffix[0]) - ord("r")) * 100 + int(suffix[1:]) + 2
+        return "legacy", match[1], number
+    return None
+
+
+def has_rar_volume_suffix(path: str) -> bool:
+    part = rar_volume(path)
+    return part is not None and (part[0] == "numbered" or part[2] > 1)
+
+
+def ordered_archive_volumes(key: str, paths: list[str]) -> tuple[str, list[str]]:
+    if not 1 <= len(paths) <= MAX_VOLUMES:
+        raise ArchiveError(f"请选择一套压缩包分卷，一次最多 {MAX_VOLUMES} 卷")
+    if key not in paths:
+        raise ArchiveError("请选择同一文件夹内的一套分卷")
+    if match := SEVEN_ZIP_VOLUME.fullmatch(key):
+        base = match[1]
+        for path in paths:
+            part = SEVEN_ZIP_VOLUME.fullmatch(path)
+            if not part or part[1] != base:
+                raise ArchiveError("请选择同一文件夹内、名称相同的一套 7z 分卷")
+        ordered = [f"{base}.{number:03d}" for number in range(1, len(paths) + 1)]
+        if set(paths) != set(ordered):
+            raise ArchiveError("请选择从 .001 开始的连续分卷，补齐缺少的卷后再试")
+        return "7z", ordered
+
+    first = rar_volume(key)
+    if first is None:
+        raise ArchiveError("请选择同一文件夹内的一套 7z 或 RAR 分卷")
+    parts = {}
+    for path in paths:
+        part = rar_volume(path)
+        if part is None or part[:2] != first[:2]:
+            raise ArchiveError("请选择同一文件夹内、名称相同的一套 RAR 分卷")
+        parts[part[2]] = path
+    expected = range(1, len(paths) + 1)
+    if set(parts) != set(expected):
+        raise ArchiveError("请选择从 .part1.rar 或 .rar 开始的连续 RAR 分卷，补齐缺少的卷后再试")
+    return "rar", [parts[number] for number in expected]
 
 
 def _dos_time(value: int) -> str | None:
@@ -694,6 +878,7 @@ class Job:
     # 只解压了 ZIP 中选中的部分文件。
     partial: bool = False
     password_error: bool = False
+    staging: bool = False
 
     def public(self) -> dict:
         return {"id": self.id, "kind": self.kind, "private": self.private, "archive": self.archive, "destination": self.destination, "format": self.format,
@@ -701,7 +886,7 @@ class Job:
                 "total_files": self.total_files, "total_bytes": self.total_bytes, "archive_size": self.archive_size, "read_bytes": self.read_bytes,
                 "done_files": self.done_files, "done_bytes": self.done_bytes, "skipped": self.skipped, "renamed": self.renamed,
                 "failed": self.failed_count, "failures": self.failures[:20], "current": self.current, "error": self.error,
-                "password_error": self.password_error,
+                "password_error": self.password_error, "staging": self.staging,
                 "archive_removed": self.archive_removed, "created_at": self.created_at, "finished_at": self.finished_at}
 
 
@@ -712,15 +897,20 @@ def _content_type(key: str) -> str | None:
 
 class ArchiveService:
     def __init__(self, objects: ObjectService, *, memory_bytes: int | None = None,
-                 sevenzip_memory_mib: Callable[[], int] | None = None):
+                 sevenzip_memory_mib: Callable[[], int] | None = None, staging: ArchiveStaging | None = None):
         self.objects = objects
         self.jobs: dict[str, Job] = {}
         self.slots = asyncio.Semaphore(RUNNING)
+        self._staging = staging
         self._decoder_budget = decoder_memory_budget(memory_bytes)
         self._decoder_config = sevenzip_memory_mib
         self._decoder_reserved = 0
         self._decoder_slots = asyncio.Condition()
         self._directories: OrderedDict[tuple, tuple[float, list[ZipEntry]]] = OrderedDict()
+
+    def _memory_limit(self) -> int:
+        configured = self._decoder_config() if self._decoder_config is not None else 0
+        return decoder_memory_limit(self._decoder_budget, configured)
 
     # ----- 预览 -----
 
@@ -737,22 +927,12 @@ class ArchiveService:
             if SEVEN_ZIP_VOLUME.fullmatch(key):
                 raise ArchiveError("请在文件列表选齐所有 7z 分卷后解压")
             check_7z_header(head, info.size)
+        if kind == "rar" and has_rar_volume_suffix(key):
+            raise ArchiveError("请在文件列表选齐所有 RAR 分卷后解压")
         return info, source, kind
 
-    async def _open_volumes(self, scope: Scope, key: str, paths: list[str]) -> SevenZipSource:
-        if not 1 <= len(paths) <= MAX_VOLUMES:
-            raise ArchiveError(f"请选择一套 7z 分卷，一次最多 {MAX_VOLUMES} 卷")
-        match = SEVEN_ZIP_VOLUME.fullmatch(key)
-        if not match or key not in paths:
-            raise ArchiveError("请选择同一文件夹内的一套 7z 分卷")
-        base = match[1]
-        for path in paths:
-            part = SEVEN_ZIP_VOLUME.fullmatch(path)
-            if not part or part[1] != base:
-                raise ArchiveError("请选择同一文件夹内、名称相同的一套 7z 分卷")
-        ordered = [f"{base}.{number:03d}" for number in range(1, len(paths) + 1)]
-        if set(paths) != set(ordered):
-            raise ArchiveError("请选择从 .001 开始的连续分卷，补齐缺少的卷后再试")
+    async def _open_volumes(self, scope: Scope, key: str, paths: list[str]) -> VolumeSource:
+        kind, ordered = ordered_archive_volumes(key, paths)
 
         def snapshots():
             return [self.objects.head_object(scope, path) for path in ordered]
@@ -763,9 +943,12 @@ class ArchiveService:
             raise ArchiveError("分卷已移动或删除，请重新选择后解压") from None
         if any(info.size <= 0 for info in infos):
             raise ArchiveError("所选分卷包含空文件，请检查压缩包")
-        source = SevenZipSource([Source(self.objects, scope, info.key, info.etag, info.size) for info in infos], split=True)
-        head = await source.read(0, min(32, source.size), window=32)
-        check_7z_header(head, source.size, split=True)
+        source = VolumeSource([Source(self.objects, scope, info.key, info.etag, info.size) for info in infos], kind, split=True)
+        if kind == "7z":
+            head = await source.read(0, min(32, source.size), window=32)
+            check_7z_header(head, source.size, split=True)
+        elif not (await source.read(0, min(8, source.parts[0].size), window=8)).startswith(RAR_SIGNATURES):
+            raise ArchiveError("RAR 首卷无效或已损坏，请检查所选分卷")
         return source
 
     def _existing(self, scope: Scope, keys: list[str]) -> dict[str, int]:
@@ -784,12 +967,12 @@ class ArchiveService:
                       *, volumes: list[str] | None = None) -> dict:
         if volumes is not None:
             source = await self._open_volumes(scope, key, volumes)
-            return {"format": "7z", "size": source.size, "room": await self.objects.metadata.run_in_thread(self._room, scope),
+            return {"format": source.format, "size": source.size, "room": await self.objects.metadata.run_in_thread(self._room, scope),
                     "listable": False, "encrypted": False, "files": None, "total_bytes": None, "entries": []}
         info, source, kind = await self._open(scope, key)
         result: dict = {"format": kind, "size": info.size, "room": await self.objects.metadata.run_in_thread(self._room, scope)}
         if kind != "zip":
-            # 7z 和 TAR 走整包解压，解压时边读边写，配额不足会停止。
+            # 7z、RAR 和 TAR 走整包解压，解压时边读边写，配额不足会停止。
             single = kind in ("gz", "bz2", "xz")
             result.update(listable=False, encrypted=False, files=1 if single else None, total_bytes=None, entries=[],
                           single_name=key.rsplit("/", 1)[-1].rsplit(".", 1)[0] if single else None)
@@ -808,7 +991,8 @@ class ArchiveService:
                       unsafe=sum(1 for _, relative in relatives if relative is None), unsupported=unsupported, single_root=single_root,
                       entries=[{"name": relative, "size": entry.size, "dir": entry.is_dir} for entry, relative in usable[:SAMPLE]])
         if encrypted and password is not None:
-            result["password_ok"] = await check_zip_password(source, entries, password.encode("utf-8"))
+            result["password_ok"] = await check_zip_password(source, entries, password.encode("utf-8"),
+                                                             memory_limit=self._memory_limit())
         if destination is not None:
             targets = [destination + relative for entry, relative in usable if not entry.is_dir]
             existing = await self.objects.metadata.run_in_thread(self._existing, scope, targets)
@@ -864,7 +1048,8 @@ class ArchiveService:
         if (entry.aes[1] if entry.aes else entry.method) not in METHODS:
             raise ArchiveError("这个文件的压缩方式不支持，请用本地解压工具打开")
         relative = safe_relative(entry.name, False) or "file"
-        return relative.rsplit("/", 1)[-1], entry.size, zip_entry_stream(source, entry, None)
+        body = zip_entry_stream(source, entry, None, memory_limit=self._memory_limit())
+        return relative.rsplit("/", 1)[-1], entry.size, body
 
     # ----- 任务 -----
 
@@ -884,7 +1069,7 @@ class ArchiveService:
             raise NotFoundError("任务不存在")
         if job.status in ("queued", "running") and not job.cancelled:
             job.cancelled = True
-            if job.format == "7z" and job.task is not None:
+            if job.kind == "extract" and job.task is not None:
                 if job.status == "queued":
                     job.status, job.finished_at = "cancelled", time.time()
                 job.task.cancel()
@@ -917,14 +1102,16 @@ class ArchiveService:
             _, source, kind = await self._open(scope, key)
         else:
             if selection is not None:
-                raise ArchiveError("7z 分卷仅支持整包解压")
+                raise ArchiveError("分卷仅支持整包解压")
             source = await self._open_volumes(scope, key, volumes)
             if any(destination.startswith(path + "/") for path in source.keys):
                 raise ArchiveError("不能解压到分卷自身的位置")
             key = source.parts[0].key
-            kind, keep_archive = "7z", True
-        if kind == "7z" and selection is not None:
-            raise ArchiveError("7z 压缩包仅支持整包解压")
+            kind, keep_archive = source.format, True
+        if kind in DECODER_FORMATS and selection is not None:
+            raise ArchiveError(f"{'7z' if kind == '7z' else 'RAR'} 压缩包仅支持整包解压")
+        if kind == "rar" and password_bytes and b"\0" in password_bytes:
+            raise ArchiveError("密码含有不支持的字符")
         plan = None
         if kind == "zip":
             entries = await self._zip_entries(scope, key, source.etag, source)
@@ -934,7 +1121,7 @@ class ArchiveService:
             if any(entry.encrypted and not entry.is_dir for entry in chosen):
                 if not password_bytes:
                     raise PasswordRequired("这个压缩包需要密码")
-                if not await check_zip_password(source, chosen, password_bytes):
+                if not await check_zip_password(source, chosen, password_bytes, memory_limit=self._memory_limit()):
                     raise ArchiveError("密码不正确")
             plan = [(entry, relative) for entry in chosen if (relative := safe_relative(entry.name, entry.is_dir)) and not ignored(relative)]
             if selection is not None:
@@ -1069,32 +1256,93 @@ class ArchiveService:
         if not exists:
             await self.objects.put_directory_marker(scope, key)
 
-    async def _write(self, scope: Scope, job: Job, key: str, body: AsyncIterator[bytes], size: int | None, *, buffered: bool = False) -> None:
+    async def _write(self, scope: Scope, job: Job, key: str, body: AsyncIterator[bytes], size: int | None) -> None:
         async def counted():
             async for chunk in body:
                 if job.cancelled:
                     raise asyncio.CancelledError()
                 job.done_bytes += len(chunk)
                 yield chunk
-        await self.objects.put_object(scope, key, counted(), size, _content_type(key), buffered=buffered)
+        before = job.done_bytes
+        try:
+            # 解压任务已有并发限制。写入只占上传名额，源流可以同时领取读取名额。
+            async with aclosing(body), aclosing(counted()) as stream:
+                await self.objects.put_object(scope, key, stream, size, _content_type(key), buffered=True)
+        except (Exception, asyncio.CancelledError) as exc:
+            job.done_bytes = before
+            if isinstance(exc, STORAGE_ERRORS) and not isinstance(exc, PermissionError):
+                raise ArchiveWriteError(_storage_failure(exc, "写回解压文件")) from None
+            raise
 
-    async def _run(self, job: Job, scope: Scope, source: Source | SevenZipSource, plan, password: bytes | None) -> None:
+    @asynccontextmanager
+    async def _staged_input(self, job: Job, source: Source | VolumeSource) -> AsyncIterator[None]:
+        if (self._staging is None or source.size < STAGE_MIN_SIZE
+                or isinstance(source, Source) and (job.format != "zip" or job.partial)):
+            yield
+            return
+
+        async def chunks():
+            parts = source.parts if isinstance(source, VolumeSource) else [source]
+            for part in parts:
+                async with aclosing(part.batches(0, part.size)) as stream:
+                    async for chunk in stream:
+                        yield chunk
+
+        async with self._staging.allocate(source.size) as staged:
+            if staged is None:
+                yield
+                return
+            reader = Reader(chunks())
+            ready = False
+            job.staging = True
+            try:
+                while job.read_bytes < source.size:
+                    block = await reader.exactly(min(FRAME_SIZE, source.size - job.read_bytes))
+                    await staged.append(block)
+                    job.read_bytes += len(block)
+                await reader.drain()
+                ready = True
+            except StagingUnavailable:
+                log.info("解压暂存不可用，改用流式读取：格式=%s，压缩包字节=%d", job.format, source.size)
+            finally:
+                job.staging, job.read_bytes = False, 0
+                await reader.close()
+            if ready:
+                if isinstance(source, Source):
+                    await self.objects.metadata.run_in_thread(source.check_version)
+                source.staged = staged
+                try:
+                    yield
+                    if isinstance(source, Source):
+                        await self.objects.metadata.run_in_thread(source.check_version)
+                finally:
+                    source.staged = None
+                return
+        # 已释放部分暂存，再重新以有界范围读取；此时还没有解压输出。
+        yield
+
+    async def _run(self, job: Job, scope: Scope, source: Source | VolumeSource, plan, password: bytes | None) -> None:
         async with self.slots:
             if job.cancelled:
                 job.status, job.finished_at = "cancelled", time.time()
                 return
             job.status = "running"
             reserved: set[str] = set()
+            memory_limit = DEFAULT_MEMORY_LIMIT
             try:
-                if isinstance(source, SevenZipSource) or job.format == "7z":
-                    packed = SevenZipSource([source]) if isinstance(source, Source) else source
-                    await self._run_7z(job, scope, packed, password.decode("utf-8") if password else None)
-                else:
-                    source.on_read = lambda size: setattr(job, "read_bytes", job.read_bytes + size)
-                    if plan is not None:
-                        await self._run_zip(job, scope, source, plan, password, reserved)
+                packed = VolumeSource([source], job.format) if job.format in DECODER_FORMATS and isinstance(source, Source) else source
+                uses_budget = (isinstance(packed, VolumeSource) or job.format in ("xz", "tar.xz")
+                               or plan is not None and any((entry.aes[1] if entry.aes else entry.method) == 14 for entry, _ in plan))
+                budget = self._reserve_decoder_memory(job) if uses_budget else nullcontext(DEFAULT_MEMORY_LIMIT)
+                async with self._staged_input(job, packed), budget as memory_limit:
+                    if isinstance(packed, VolumeSource):
+                        await self._run_decoder(job, scope, packed, password.decode("utf-8") if password else None, memory_limit)
                     else:
-                        await self._run_stream(job, scope, source, reserved)
+                        packed.on_read = lambda size: setattr(job, "read_bytes", job.read_bytes + size)
+                        if plan is not None:
+                            await self._run_zip(job, scope, packed, plan, password, reserved, memory_limit)
+                        else:
+                            await self._run_stream(job, scope, packed, reserved, memory_limit)
                 if not job.cancelled and isinstance(source, Source) and not job.keep_archive and not job.failed_count:
                     # 原压缩包处理完成后再结束任务，前端轮询才能看到最终结果。
                     info = await self.objects.metadata.run_in_thread(self.objects.head_object, scope, job.archive)
@@ -1106,19 +1354,27 @@ class ArchiveService:
                 job.status = "cancelled"
             except QuotaExceededError:
                 job.status, job.error = "failed", "空间不足，解压已停止；已解出的文件保留"
-            except SevenZipError as exc:
+            except DecoderError as exc:
                 job.status, job.error = "failed", str(exc)
                 job.password_error = exc.code in ("encrypted", "password")
+                if exc.code == "memory":
+                    job.error += f"。本任务上限为 {memory_limit // MIB} MiB，可在系统设置的「下载与资源」中调整。"
+            except MemoryError:
+                job.status, job.error = "failed", "解压时内存不足，请联系管理员检查服务器内存和解压内存上限"
             except Exception as exc:  # noqa: BLE001 - 任务失败原因交给界面显示
                 job.status = "failed"
                 job.error = str(exc) if isinstance(exc, (ArchiveError, ValueError, PermissionError)) else "解压失败，请稍后重试"
                 if type(exc).__name__ == "PrivateLocked":
                     job.error = "私密空间已锁定，解压已停止；已解出的文件保留"
+                if not isinstance(exc, (ArchiveError, ValueError, PermissionError)):
+                    log.warning("在线解压异常：格式=%s，压缩包字节=%d，已解出=%d，异常=%s",
+                                job.format, job.archive_size, job.done_files, type(exc).__name__)
             finally:
                 job.current = ""
                 job.finished_at = time.time()
 
-    async def _run_zip(self, job: Job, scope: Scope, source: Source, plan, password: bytes | None, reserved: set[str]) -> None:
+    async def _run_zip(self, job: Job, scope: Scope, source: Source, plan, password: bytes | None,
+                       reserved: set[str], memory_limit: int) -> None:
         for entry, relative in plan:
             if job.cancelled:
                 return
@@ -1131,20 +1387,20 @@ class ArchiveService:
             key = await self._target(scope, job, relative, reserved)
             if key is None:
                 continue
-            before = job.done_bytes
             try:
-                await self._write(scope, job, key, zip_entry_stream(source, entry, password), entry.size)
+                body = zip_entry_stream(source, entry, password, memory_limit=memory_limit, batch_reads=True)
+                await self._write(scope, job, key, body, entry.size)
                 job.done_files += 1
+            except (ArchiveReadError, ArchiveWriteError):
+                raise
             except (ArchiveError, ValueError) as exc:
-                if isinstance(exc, ArchiveError) and "已被修改" in str(exc):
-                    raise
-                job.done_bytes = before + entry.size
                 self._fail(job, relative, str(exc) if isinstance(exc, ArchiveError) else "写入失败")
 
-    async def _run_stream(self, job: Job, scope: Scope, source: Source, reserved: set[str]) -> None:
+    async def _run_stream(self, job: Job, scope: Scope, source: Source, reserved: set[str], memory_limit: int) -> None:
         kind = job.format
         compression = kind.split(".", 1)[1] if kind.startswith("tar.") else kind if kind in ("gz", "bz2", "xz") else None
-        chunks = decompressed(source.stream(0, job.archive_size), compression) if compression else source.stream(0, job.archive_size)
+        source_stream = source.batches(0, job.archive_size)
+        chunks = decompressed(source_stream, compression, memory_limit=memory_limit) if compression else source_stream
         if kind in ("gz", "bz2", "xz"):
             name = job.archive.rsplit("/", 1)[-1].rsplit(".", 1)[0] or "解压结果"
             relative = safe_relative(name, False) or "解压结果"
@@ -1176,6 +1432,9 @@ class ArchiveService:
                     continue
                 await self._write(scope, job, key, body(), member.size)
                 job.done_files += 1
+            if compression:
+                # TAR 条目结束不代表外层 gzip／bzip2／XZ 已读到尾部校验。
+                await reader.drain()
         finally:
             await reader.close()
 
@@ -1183,8 +1442,7 @@ class ArchiveService:
     async def _reserve_decoder_memory(self, job: Job) -> AsyncIterator[int]:
         async with self._decoder_slots:
             while True:
-                configured = self._decoder_config() if self._decoder_config is not None else 0
-                memory_limit = decoder_memory_limit(self._decoder_budget, configured)
+                memory_limit = self._memory_limit()
                 if self._decoder_reserved + memory_limit <= self._decoder_budget:
                     self._decoder_reserved += memory_limit
                     job.status = "running"
@@ -1203,7 +1461,7 @@ class ArchiveService:
                 self._decoder_reserved -= memory_limit
                 self._decoder_slots.notify_all()
 
-    async def _run_7z(self, job: Job, scope: Scope, source: SevenZipSource, password: str | None) -> None:
+    async def _run_decoder(self, job: Job, scope: Scope, source: VolumeSource, password: str | None, memory_limit: int) -> None:
         def check():
             if job.cancelled:
                 raise asyncio.CancelledError()
@@ -1217,9 +1475,11 @@ class ArchiveService:
 
         reserved = set(source.keys)
         reserved_path_bytes = sum(map(sys.getsizeof, reserved))
+        rar_volumes = [part.size for part in source.parts] if source.format == "rar" else None
+        numbered = bool(rar_volumes and RAR_NUMBERED_VOLUME.fullmatch(source.parts[0].key))
         await self.objects.metadata.run_in_thread(source.check_versions)
-        async with (self._reserve_decoder_memory(job) as memory_limit,
-                    open_decoder(read, source.size, check, password=password, memory_limit=memory_limit) as decoder):
+        async with open_decoder(read, source.size, check, password=password, memory_limit=memory_limit,
+                                rar_volumes=rar_volumes, numbered=numbered) as decoder:
             while (entry := await decoder.next_entry()) is not None:
                 name, kind, size = entry
                 relative = safe_relative(name, kind == "dir")
@@ -1239,21 +1499,21 @@ class ArchiveService:
                         # 同名处理在主进程记录已写入的路径，按实际占用限制这部分内存。
                         reserved_path_bytes += sys.getsizeof(key)
                         if reserved_path_bytes + sys.getsizeof(reserved) > memory_limit // 8:
-                            raise ArchiveError("7z 解压的文件路径占用内存超出预算，解压已停止")
-                        before = job.done_bytes
-                        try:
-                            async with aclosing(decoder.content(size)) as content:
-                                await self._write(scope, job, key, content, size, buffered=True)
-                        except (Exception, asyncio.CancelledError):
-                            job.done_bytes = before
-                            raise
+                            raise ArchiveError(f"{decoder.label} 解压的文件路径占用内存超出预算，解压已停止")
+                        await self._write(scope, job, key, decoder.content(size), size)
                         job.done_files += 1
                         continue
                 await decoder.skip()
         await self.objects.metadata.run_in_thread(source.check_versions)
 
     async def stop(self) -> None:
+        pending = []
         for job in self.jobs.values():
-            job.cancelled = True
             if job.task is not None and not job.task.done():
-                job.task.cancel()
+                job.cancelled = True
+                pending.append(job.task)
+                if not job.task.cancelling():
+                    if job.status == "queued":
+                        job.status, job.finished_at = "cancelled", time.time()
+                    job.task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)

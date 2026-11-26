@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 
 from ..api import normalize_user_path
-from ..extract import ARCHIVE_TYPES, UNSUPPORTED
+from ..extract import ARCHIVE_TYPES, SEVEN_ZIP_VOLUME, UNSUPPORTED, has_rar_volume_suffix
 from ..filekinds import kind_clause, kind_of
 from ..objects import PRIVATE_PREFIX
 from .actions import KINDS, directory_version, folder_files
@@ -474,8 +474,8 @@ async def propose_copy(ctx: ToolContext, args: dict) -> ToolOutput:
 
 
 @tool("propose_extract", "解压", "write", "write",
-      "生成在线解压压缩包的操作（服务端边读边解压，支持 ZIP、7z 单包、TAR、.tar.gz/.tgz、.tar.bz2、.tar.xz 与单个 .gz/.bz2/.xz）。"
-      "destination 省略时解压到压缩包所在目录下与压缩包同名的文件夹。加密压缩包请在文件页用「解压…」输入密码，7z 分卷请在文件列表选齐后解压。"
+      "生成在线解压压缩包的操作（服务端边读边解压，支持 ZIP、7z 和 RAR 单包、TAR、.tar.gz/.tgz、.tar.bz2、.tar.xz 与单个 .gz/.bz2/.xz）。"
+      "destination 省略时解压到压缩包所在目录下与压缩包同名的文件夹。加密压缩包请在文件页用「解压…」输入密码，7z 和 RAR 分卷请在文件列表选齐后解压。"
       "conflict：rename 保留两者（默认）、skip 跳过、overwrite 覆盖；keep_archive=false 时全部成功后把压缩包移入回收站。",
       {"paths": {"type": "array", "items": {"type": "string"}, "description": "压缩包路径（最多 20 个）"},
        "destination": {"type": "string", "description": "解压到的目录；省略时为压缩包同名文件夹"},
@@ -497,8 +497,11 @@ async def propose_extract(ctx: ToolContext, args: dict) -> ToolOutput:
     for value in dict.fromkeys(paths):
         key = ctx.resolve(value)
         name = _name_of(key)
+        if SEVEN_ZIP_VOLUME.fullmatch(name) or has_rar_volume_suffix(name):
+            skipped.append({"path": ctx.display(key), "reason": "请在文件列表选齐所有分卷后解压"})
+            continue
         if UNSUPPORTED.search(name):
-            skipped.append({"path": ctx.display(key), "reason": "不支持 RAR 等格式"})
+            skipped.append({"path": ctx.display(key), "reason": "暂不支持这种压缩格式"})
             continue
         if not ARCHIVE_TYPES.search(name):
             skipped.append({"path": ctx.display(key), "reason": "不是支持的压缩包"})

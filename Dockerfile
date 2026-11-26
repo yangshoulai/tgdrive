@@ -25,12 +25,23 @@ COPY --from=ffmpeg-static /versions.json /out/licenses/ffmpeg/versions.json
 COPY licenses/ffmpeg/NOTICE.md /out/licenses/ffmpeg/NOTICE.md
 FROM ffmpeg-${INSTALL_FFMPEG} AS ffmpeg-selected
 
+# 从固定的上游源码构建 RAR 解码库，只将共享库及对应源码和许可带入运行镜像。
+FROM python:3.12-slim AS rar-build
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl g++ make xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build/rar
+COPY native/rar ./
+RUN sh build.sh /out
+
 # 运行阶段：API 服务同时托管用户端根路径和 /admin/ 管理端。
 FROM python:3.12-slim AS runtime
 
-# CBR 的 RAR 图片解压在受限子进程中使用 libarchive；不引入额外 Python 运行时依赖。
-RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tools \
+# CBR 与普通 7z 使用 libarchive，RAR 在线解压使用独立的 7-Zip 共享库。
+RUN apt-get update && apt-get install -y --no-install-recommends libarchive-tools libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=rar-build /out/lib/ /usr/local/lib/tessera/
+COPY --from=rar-build /out/licenses/ /app/licenses/7zip/
+COPY licenses/7zip/NOTICE.md /app/licenses/7zip/NOTICE.md
 
 # 默认保留轻量镜像；带 FFmpeg 的变体支持视频封装与图片／音视频缩略图后台生成。
 COPY --from=ffmpeg-selected /out/bin/ /usr/local/bin/
@@ -72,9 +83,7 @@ COPY --from=platform-js /usr/local/bin/node /usr/local/bin/node
 COPY --from=ffmpeg-static /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg-static /versions.json /app/licenses/ffmpeg/versions.json
 COPY licenses/ffmpeg/NOTICE.md /app/licenses/ffmpeg/NOTICE.md
-RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir '.[platform]' \
+RUN pip install --no-cache-dir '.[platform]' \
     && mkdir -p /app/licenses/platform \
     && pip download --no-cache-dir --no-deps --no-binary=:all: gallery-dl==1.32.16 -d /app/licenses/platform \
     && node --version

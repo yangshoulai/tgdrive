@@ -650,10 +650,21 @@ export const formatDimensions = (size: MediaSize) => `${size.width} × ${size.he
 /** 记录图片／视频的显示尺寸（只写入仍是这个版本的文件）。 */
 export const setMediaSize = (file: Pick<FileItem, "key" | "etag">, size: MediaSize) =>
   post<{ saved: boolean }>(fileApi("/media/size", file.key), { path: file.key, etag: file.etag, width: size.width, height: size.height });
-/** 支持在线解压的单包：ZIP、7z、TAR 系列及单个 .gz／.bz2／.xz。 */
-export const ARCHIVE_NAME = /\.(zip|7z|tar|tgz|tbz2?|txz|tar\.(?:gz|bz2|xz)|gz|bz2|xz)$/i;
-/** 捕获分卷名中包含目录的共同部分，例如 folder/archive.7z。 */
-export const ARCHIVE_VOLUME_NAME = /^(.*\.7z)\.[0-9]{3,}$/i;
+/** 支持在线解压的单包：ZIP、7z、RAR、TAR 系列及单个 .gz／.bz2／.xz。 */
+export const ARCHIVE_NAME = /\.(zip|7z|rar|tar|tgz|tbz2?|txz|tar\.(?:gz|bz2|xz)|gz|bz2|xz)$/i;
+/** 共同名称包含目录。旧式 RAR 的 .rar 既可能是普通包，也可能是分卷首卷。 */
+export function archiveVolumeName(path: string) {
+  const sevenZip = /^(.*\.7z)\.([0-9]{3,})$/i.exec(path);
+  if (sevenZip) return { base: sevenZip[1], style: "7z", first: sevenZip[2] === "001", part: true };
+  const numbered = /^(.*)\.part([0-9]+)\.rar$/i.exec(path);
+  if (numbered) return { base: `${numbered[1]}.rar`, style: "rar-numbered", first: Number(numbered[2]) === 1, part: true };
+  const legacy = /^(.*)\.(rar|[r-z][0-9]{2})$/i.exec(path);
+  if (legacy) {
+    const first = legacy[2].toLowerCase() === "rar";
+    return { base: `${legacy[1]}.rar`, style: "rar-legacy", first, part: !first };
+  }
+  return null;
+}
 export type ArchiveInfo = {
   format: string; size: number; room: number | null; listable: boolean; encrypted: boolean; encryption?: "aes" | "zipcrypto" | null;
   files: number | null; total_bytes: number | null; entries: { name: string; size: number; dir: boolean }[];
@@ -668,7 +679,7 @@ export type ArchiveJob = {
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   total_files: number | null; total_bytes: number | null; archive_size: number; read_bytes: number;
   done_files: number; done_bytes: number; skipped: number; renamed: number; failed: number; failures: { name: string; error: string }[];
-  current: string; error: string; password_error?: boolean; archive_removed: boolean; created_at: number; finished_at: number | null;
+  current: string; error: string; password_error?: boolean; staging?: boolean; archive_removed: boolean; created_at: number; finished_at: number | null;
 };
 export const inspectArchive = (path: string, options: { destination?: string; password?: string; volumes?: string[] } = {}) =>
   post<ArchiveInfo>(fileApi("/archive/inspect", path), { path, ...options }, 60000);

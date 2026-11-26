@@ -162,7 +162,7 @@ class ResourceSettings:
         sevenzip_mib = merged["sevenzip_memory_mib"]
         low, high = MIN_MEMORY_LIMIT // MIB, MAX_MEMORY_LIMIT // MIB
         if type(sevenzip_mib) is not int or (sevenzip_mib != 0 and not low <= sevenzip_mib <= high):
-            raise ValueError(f"7z 解压内存上限须为 {low}–{high} MiB，0 表示自动")
+            raise ValueError(f"解压内存上限须为 {low}–{high} MiB，0 表示自动")
         for key, high in (("transfer_concurrency", 32), ("bucket_concurrency", 32)):
             if type(merged[key]) is not int or not 1 <= merged[key] <= high:
                 raise ValueError("文件读取并发须为 1–32")

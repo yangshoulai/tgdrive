@@ -1,4 +1,4 @@
-"""受限的 7z 解码进程。通过 stdin / stdout 随机读取归档并传回条目。"""
+"""受限的 7z 与 RAR 解码进程。通过 stdin / stdout 随机读取归档并传回条目。"""
 
 from __future__ import annotations
 
@@ -270,6 +270,7 @@ def main() -> None:
     try:
         request = json.loads(sys.stdin.buffer.readline(MESSAGE_LIMIT))
         size, password, memory_limit = request["size"], request["password"], request["memory_limit"]
+        rar_volumes = request.get("rar_volumes")
         if not (type(size) is int and 0 < size < 2**63
                 and type(memory_limit) is int and 0 < memory_limit <= MAX_MEMORY_LIMIT
                 and (password is None or isinstance(password, str) and 0 < len(password) <= 1024)):
@@ -278,14 +279,25 @@ def main() -> None:
             import resource
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
             if sys.platform == "linux":
-                limits = (resource.RLIMIT_AS, resource.RLIMIT_DATA) if password is not None else (resource.RLIMIT_AS,)
+                limits = (resource.RLIMIT_AS, resource.RLIMIT_DATA) if password is not None and rar_volumes is None else (resource.RLIMIT_AS,)
                 for resource_id in limits:
                     soft, _ = resource.getrlimit(resource_id)
                     if soft != resource.RLIM_INFINITY:
                         memory_limit = min(soft, memory_limit)
                     resource.setrlimit(resource_id, (memory_limit, memory_limit))
         source = RangeInput(size, memory_limit)
-        if password is None:
+        if rar_volumes is not None:
+            from .rar_worker import extract_rar
+
+            numbered = request.get("numbered")
+            if not (isinstance(rar_volumes, list) and rar_volumes
+                    and all(type(part) is int and 0 < part <= size for part in rar_volumes)
+                    and sum(rar_volumes) == size and isinstance(numbered, bool)):
+                raise DecodeError("invalid")
+            error = extract_rar(source, rar_volumes, numbered, password, select_entry, emit)
+            if error is not None:
+                raise DecodeError(error)
+        elif password is None:
             extract(source)
         else:
             extract_with_password(source, password)

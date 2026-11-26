@@ -1,5 +1,5 @@
 /** 压缩包预览：不解压就能按目录浏览 ZIP 里的文件，打开其中的图片、文本、代码、PDF 等，或单独下载某个文件。
- * 服务器只解出被打开的那一个 ZIP 条目（见 extract.py 的 browse／entry）；7z 和 TAR 提供整包解压入口。 */
+ * 服务器只解出被打开的那一个 ZIP 条目。7z、RAR 和 TAR 提供整包解压入口。 */
 import { useContext, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import * as api from "./api";
@@ -56,10 +56,12 @@ export function ArchivePreview({ file, downloadUrl, onExtract }: { file: api.Fil
     <h3>压缩包没有打开</h3><p>{error}</p>
     <div className="preview-recovery">{extract}<ButtonLink size="sm" icon="download" href={downloadUrl}>下载文件</ButtonLink></div></div>;
   if (!listing) return <div className="preview-engine-loading" role="status"><span className="spinner" />正在读取压缩包目录…</div>;
+  const packed = listing.format === "7z" || listing.format === "rar";
+  const format = listing.format === "7z" ? "7z" : listing.format.toUpperCase();
   if (!listing.listable) return <>{header}<div className="preview-fallback">
     <span className="file-tile tile-archive tile-xl" aria-hidden="true"><FileGlyph kind="archive" size={56} /></span>
-    <h3>{listing.format === "7z" ? "7z 压缩包" : `${listing.format.toUpperCase()} 压缩包不能直接浏览`}</h3>
-    <p>{listing.format === "7z" ? "可在文件空间解压全部文件，或下载后在本地打开。"
+    <h3>{packed ? `${format} 压缩包` : `${format} 压缩包不能直接浏览`}</h3>
+    <p>{packed ? "可在文件空间解压全部文件，或下载后在本地打开。"
       : `${/^(gz|bz2|xz)$/.test(listing.format) ? "这是单个文件的压缩包，解压后得到一个文件。" : "TAR 压缩包没有目录索引，要读完整个压缩包才知道里面有什么。"}可以在线解压到网盘，或下载后在本地打开。`}</p>
     <div className="preview-recovery">{extract}<ButtonLink size="sm" variant={onExtract ? "secondary" : "primary"} icon="download" href={downloadUrl}>下载文件</ButtonLink></div>
   </div></>;

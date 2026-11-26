@@ -121,7 +121,7 @@ class BlobEngine:
                 raise ValueError("系统小对象最多 2 MB")
             return await self._put_part(blob_uuid, part_no, body)
         if buffered:
-            # 离线下载分段和有独立并发限制的 7z 解压写入只受上传名额与限速约束。
+            # 离线下载分段和有独立并发限制的解压写入只受上传名额与限速约束。
             # 否则多个任务同时写入会占满同一存储桶的名额，本机缓存、预览与播放排队超时（503 或反向代理 524）。
             return await self._put_part(blob_uuid, part_no, body)
         # 在读取请求体前取得名额，让 ASGI 的背压限制尚未获准的上传。

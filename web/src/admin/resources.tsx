@@ -76,7 +76,7 @@ export function Resources() {
             <Field label="网页单个文件的分段并发" hint="大于 64 MB 的文件分段上传时同时发送的分段数，1–16。"><input className="input" type="number" min={1} max={16} step={1} required value={form.web_part_concurrency} onChange={number("web_part_concurrency")} /></Field>
             <Field label="网页同时上传的文件数" hint="1–8；网页开始上传时读取，最长 1 分钟后生效。"><input className="input" type="number" min={1} max={8} step={1} required value={form.web_file_concurrency} onChange={number("web_file_concurrency")} /></Field>
           </div>
-          <Field label="7z 解压内存上限（MiB）" hint="留空时按环境自动设置。手动可填 128–8192，实际值受服务器内存预算约束。Linux 上按任务执行，保存后对后续解压生效。">
+          <Field label="解压内存上限（MiB）" hint="用于 7z、RAR、XZ 和 ZIP 的 LZMA 解码。留空时按环境自动设置，手动可填 128–8192。实际值受服务器内存预算约束，保存后对后续任务生效。">
             <input className="input" type="number" min={128} max={8192} step={1} placeholder="自动" disabled={busy}
               value={form.sevenzip_memory_mib || ""} onChange={number("sevenzip_memory_mib")} />
           </Field>
@@ -99,7 +99,7 @@ export function Resources() {
           </div>
           <div className="form-row">
             <Field label="每个 Bot 的发送间隔（毫秒）" hint="0–10000。过短容易被 Telegram 限流，限流后会自动退避。"><input className="input" type="number" min={0} max={10000} step={1} required value={form.bot_interval_ms} onChange={number("bot_interval_ms")} /></Field>
-            <Field label="磁盘保留空间（MiB）" hint="至少 128；剩余空间不足时离线下载等待释放。"><input className="input" type="number" min={128} max={1048576} step={1} required value={form.reserve_mib} onChange={number("reserve_mib")} /></Field>
+            <Field label="磁盘保留空间（MiB）" hint="至少 128。空间不足时离线下载等待释放，在线解压直接从存储读取。"><input className="input" type="number" min={128} max={1048576} step={1} required value={form.reserve_mib} onChange={number("reserve_mib")} /></Field>
           </div>
           <div className="form-row">
             <Field label="文件校验每日读取量（MiB）" hint="后台「文件校验」每天最多从存储读取这么多已保存的数据，检查是否完好，读满后第二天从停下的位置继续。0–1048576，默认 2048；0 关闭自动校验（仍可在「安全与维护」手动运行）。数值越大检查一轮越快，但占用的 Telegram 读取量越多。">
@@ -123,7 +123,7 @@ export function Resources() {
         ["文件读取", `服务器 ${effective.transfer_concurrency} 路 · 每个账号 ${effective.bucket_concurrency} 路`],
         ["写入存储", `${effective.upload_concurrency} 个分片 · ${rate(effective.upload_kib)}`],
         ["网页上传", `每个文件 ${effective.web_part_concurrency} 段 · 同时 ${effective.web_file_concurrency} 个文件`],
-        ["7z 解压内存", `${settings.config.sevenzip_memory_mib ? "手动" : "自动"} · 每个任务 ${effective.sevenzip_memory_mib.toLocaleString("zh-CN")} MiB`],
+        ["解压内存", `${settings.config.sevenzip_memory_mib ? "手动" : "自动"} · 每个任务 ${effective.sevenzip_memory_mib.toLocaleString("zh-CN")} MiB`],
         ["封面读取", `${effective.thumbnail_concurrency} 路`],
         ["出站代理", effective.proxy || "直连"],
         ["视频组件", `FFmpeg ${component(effective.hls_available)} · X ${component(effective.x_available)} · YouTube ${effective.youtube_available ? "可用" : "组件不完整"}`],
@@ -131,7 +131,7 @@ export function Resources() {
       {effective.reduced && <Notice tone="warning">资源预算不足，离线下载并发已按检测到的内存降低为 {effective.concurrency} 个。</Notice>}
       {effective.upload_reduced && <Notice tone="warning">上传并发已按{effective.mode === "low" ? "低资源档与内存预算" : "检测到的内存"}降低为写入 {effective.upload_concurrency} 个分片、网页每个文件 {effective.web_part_concurrency} 段。</Notice>}
       {effective.transfer_reduced && <Notice tone="warning">文件读取并发已按{effective.mode === "low" ? "低资源档与内存预算" : "检测到的内存"}降低为服务器 {effective.transfer_concurrency} 路、每个账号 {effective.bucket_concurrency} 路。</Notice>}
-      {settings.config.sevenzip_memory_mib > effective.sevenzip_memory_mib && <Notice tone="warning">7z 解压内存上限已按服务器预算调整为每个任务 {effective.sevenzip_memory_mib.toLocaleString("zh-CN")} MiB。</Notice>}
+      {settings.config.sevenzip_memory_mib > effective.sevenzip_memory_mib && <Notice tone="warning">解压内存上限已按服务器预算调整为每个任务 {effective.sevenzip_memory_mib.toLocaleString("zh-CN")} MiB。</Notice>}
       {settings.pressure && <Notice tone="warning">{settings.pressure}</Notice>}
       {settings.components.ytdlp_age_days !== null && settings.components.ytdlp_age_days > 60 && <Notice tone="warning">yt-dlp 已发布 {settings.components.ytdlp_age_days} 天。YouTube 经常调整接口，解析失败时请拉取最新的平台镜像。</Notice>}
       <Disclosure title="检测信息与组件版本" description="服务器资源、视频处理方式与各组件版本。">

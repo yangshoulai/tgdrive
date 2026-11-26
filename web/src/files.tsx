@@ -122,7 +122,7 @@ export function getFileKind(type: string | null | undefined, name: string): File
   if (named(/\.(pptx?|potx?|odp|key|dps)$/) || /presentationml|ms-powerpoint|opendocument\.presentation/.test(mime)) return "presentation";
   if ((generic || textual) && (/\.(js|mjs|cjs|ts|tsx|jsx|py|go|rs|java|c|cc|cpp|cxx|h|hpp|cs|sh|bash|zsh|ps1|bat|html?|css|scss|sass|less|vue|svelte|sql|rb|php|swift|kt|kts|scala|dart|gradle|lua|diff|patch)$/.test(lower) || /(^|\/)(dockerfile|makefile)$/.test(lower))) return "code";
   if (textual || named(/\.(md|markdown|mdx|rst|txt|json|jsonc|jsonl|ndjson|geojson|ipynb|csv|tsv|log|xml|ya?ml|toml|ini|conf|cfg|properties|env|gitignore|editorconfig|lrc|srt|vtt)$/) || generic && /(^|\/)\.env(\.[\w.-]+)?$/.test(lower)) return "text";
-  if (named(/\.(zip|rar|7z|tar|gz|tgz|bz2|xz|zst|dmg|iso)$/) || /zip|compressed|x-tar/.test(mime)) return "archive";
+  if (named(/\.(zip|rar|7z|tar|gz|tgz|bz2|xz|zst|dmg|iso)$/) || /zip|compressed|x-tar|vnd\.rar|x-rar/.test(mime)) return "archive";
   return "other";
 }
 
@@ -302,7 +302,7 @@ export function resolveRelativeKey(baseDir: string, src: string): string | null 
 /** 内容区：分享页与预览弹窗共用同一套渲染逻辑。 */
 type PreviewProps = { kind: FileKind; url: string; name: string; downloadUrl: string; contentType?: string | null; /** 文件大小：音乐没有歌词时显示大小与估算码率。 */ size?: number; /** 已记录的图片／视频显示尺寸：视频按它设播放器比例，图片按它在加载前就把封面与原图放到最终位置。 */ videoSize?: api.MediaSize; poster?: string; posterMaxEdge?: number; onImageLoad?: (image: HTMLImageElement) => void; onImageSize?: (width: number, height: number, original: boolean) => void; resolveImage?: (src: string) => string | null; loadAssets?: AssetLoader; assetUrl?: (path: string) => string; nav?: PreviewNav; strip?: PreviewStrip; text?: TextEditing;
   /** 电子书的阅读位置：按内容版本记住（remember 为假时只记在本页内存里，私密文件用）。 */ positionKey?: string | null; rememberPosition?: boolean;
-  /** 本人的压缩包：可以浏览内容并在线解压。 */ archive?: { file: api.FileItem; onExtract?: (picks?: string[]) => void } } & PlaybackProps;
+  /** 本人的压缩包或分卷：用于解压入口或多选分卷提示。 */ archive?: { file: api.FileItem; onExtract?: (picks?: string[]) => void } } & PlaybackProps;
 /** 文本编辑：只给本人有写权限的文件。key 是文件路径（保存后地址随版本变化，编辑器不重建）；load 递增时重新读取（换文件、外部改动、冲突后重新加载）。 */
 type TextEditing = { key: string; load: number; save: (data: Uint8Array, force: boolean) => Promise<void>; reload: () => Promise<void>; onDirty: (dirty: boolean) => void; start?: boolean };
 export function FilePreview(props: PreviewProps) {
@@ -343,7 +343,8 @@ function PreviewContent({ kind, url, name, downloadUrl, contentType, size, video
   const unplayable = (kind === "video" || kind === "audio") && !isPlayable(name, contentType);
   const lower = (extension ?? "").toLowerCase();
   // 不支持在线查看的常见类型给出具体的打开方式，其余用通用说明。
-  const advice = /^(docx?|xlsx?|pptx?|odt|ods|odp|pages|numbers|key|rtf)$/.test(lower) ? "Office 与办公文档请下载后用 Word、Excel、Keynote 等应用打开。"
+  const advice = archive && api.archiveVolumeName(name)?.part ? "在文件列表选齐同一套分卷，再点「解压…」。"
+    : /^(docx?|xlsx?|pptx?|odt|ods|odp|pages|numbers|key|rtf)$/.test(lower) ? "Office 与办公文档请下载后用 Word、Excel、Keynote 等应用打开。"
     : /^(zip|rar|7z|tar|gz|tgz|bz2|xz|zst)$/.test(lower) ? "压缩包不能在线查看，下载后解压即可使用。"
     : /^(exe|msi|dmg|pkg|apk|ipa|deb|rpm|iso|img)$/.test(lower) ? "安装包与磁盘映像请下载后在对应的系统中打开。"
     : "下载后用本地应用打开。";
@@ -820,7 +821,7 @@ export function PreviewModal({ file, url, downloadUrl, poster, grid, thumbnail, 
         </>}
       </>}>
       <div ref={stage} className={`preview-stage${browsable ? " has-playlist is-media" : ""}${reading ? " is-reading" : ""}${panelOpen ? " is-playlist-open" : ""}${fullyCached ? " is-cached" : ""}`}><PreviewToolsContext.Provider value={readingTools}><PreviewCachedContext.Provider value={fullyCached}><FilePreview text={textEditing} kind={kind} size={active.size} videoSize={knownSize ?? undefined} url={ownSource || kind === "image" || kind === "video" || kind === "audio" ? api.versionedContentUrl(source.url, active.etag, active.size, canPreview(kind, active.key, active.content_type)) : source.url}
-        positionKey={active.etag || null} rememberPosition={!api.isPrivatePath(active.key)} archive={format === "archive" && ownSource ? { file: active, onExtract: onExtract ? picks => onExtract(active, picks) : undefined } : undefined} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={imagePoster} posterMaxEdge={imagePosterMaxEdge} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={(width, height, original) => { if (original) recordSize(width, height); }} onVideoFrame={video => onVideoFrame?.(video, active)} onBufferSpeed={setBufferSpeed} onSaveThumbnail={onSaveVideoThumbnail ? (video, degrees) => onSaveVideoThumbnail(video, active, degrees) : undefined} rotation={rotation} onRotate={rotateVideo} resolveImage={resolveImage} assetUrl={assetUrl}
+        positionKey={active.etag || null} rememberPosition={!api.isPrivatePath(active.key)} archive={ownSource && (format === "archive" || api.archiveVolumeName(active.key)?.part) ? { file: active, onExtract: onExtract ? picks => onExtract(active, picks) : undefined } : undefined} name={baseName(active.key)} downloadUrl={downloadHref} contentType={active.content_type} poster={imagePoster} posterMaxEdge={imagePosterMaxEdge} onImageLoad={image => onImageLoad?.(image, active)} onImageSize={(width, height, original) => { if (original) recordSize(width, height); }} onVideoFrame={video => onVideoFrame?.(video, active)} onBufferSpeed={setBufferSpeed} onSaveThumbnail={onSaveVideoThumbnail ? (video, degrees) => onSaveVideoThumbnail(video, active, degrees) : undefined} rotation={rotation} onRotate={rotateVideo} resolveImage={resolveImage} assetUrl={assetUrl}
         onPlaying={setPlaying} onEnded={() => { const next = playlist.next(true); if (next) select(next); }}
         onVideoSize={(width, height, from) => { if (from === "video") recordSize(width, height); setVideoSize(current => current?.key === active.key && current.etag === active.etag && current.ratio === width / height ? current : { key: active.key, etag: active.etag, ratio: width / height }); }}
         onProgress={value => { trackPrefetch(value); setProgress(current => current.currentTime === value.currentTime && current.duration === value.duration ? current : value); }} onState={setMediaState}

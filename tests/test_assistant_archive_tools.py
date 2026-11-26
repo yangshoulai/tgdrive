@@ -75,12 +75,12 @@ class ArchiveToolTests(ActionHelpers, AssistantCase):
     def test_extract_rejects_unsupported_formats(self):
         async def run():
             user, conversation = await self.ready()
-            await self.put("x.rar", b"Rar!")
-            self.model.replies = [call("propose_extract", paths=["/x.rar"])]
+            await self.put("x.cab", b"MSCF")
+            self.model.replies = [call("propose_extract", paths=["/x.cab"])]
             await self.send(user, conversation, "解压")
             tool = (await self.tool_results(user, conversation))[-1]
             self.assertEqual(tool["status"], "error")
-            self.assertIn("RAR", tool["result"]["error"])
+            self.assertIn("暂不支持这种压缩格式", tool["result"]["error"])
         self.run_async(run())
 
     def test_compress_creates_zip_and_undo_removes_it(self):

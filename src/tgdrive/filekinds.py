@@ -47,7 +47,7 @@ _RULES: list[tuple] = [
      _ext("md", "markdown", "mdx", "rst", "txt", "json", "jsonc", "jsonl", "ndjson", "geojson", "ipynb", "csv", "tsv", "log", "xml", "yml", "yaml", "toml", "ini",
           "conf", "cfg", "properties", "env", "gitignore", "editorconfig", "lrc", "srt", "vtt")
      + [".env", "%/.env", ".env.%", "%/.env.%"]),
-    ("archive", ["%zip%", "%compressed%", "%x-tar%"],
+    ("archive", ["%zip%", "%compressed%", "%x-tar%", "%vnd.rar%", "%x-rar%"],
      _ext("zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "zst", "dmg", "iso")),
 ]
 

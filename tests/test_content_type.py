@@ -49,6 +49,8 @@ class SniffTests(unittest.TestCase):
         self.assertEqual(kind_of("song.flac", "video/x-flac"), "audio", "容器相同时音频扩展名仍算音频")
         self.assertEqual(kind_of("main.py", "text/plain"), "text")
         self.assertEqual(kind_of("book.epub", "application/epub+zip"), "document", "电子书归文档，不算压缩包")
+        self.assertEqual(kind_of("a.rar", "application/vnd.rar"), "archive")
+        self.assertEqual(kind_of("a.r00", "application/x-rar-compressed"), "archive")
         self.assertEqual(kind_of("a.ipynb", "application/x-ipynb+json"), "text")
         self.assertEqual(kind_of("a.jsonl", None), "text")
         self.assertEqual(kind_of("0018.png", "application/force-download"), "image", "下载站的强制下载类型不说明格式，按扩展名")

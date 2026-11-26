@@ -37,7 +37,7 @@ class ResourceBudgetTests(unittest.TestCase):
                 effective = self.effective(memory=budget, sevenzip_memory_mib=configured)
                 self.assertEqual(effective["sevenzip_memory_mib"], expected)
         for invalid in (-1, 127, 8193, 256.5, True, "512"):
-            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "7z 解压内存上限"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "解压内存上限"):
                 ResourceSettings.validate({"sevenzip_memory_mib": invalid})
 
     def test_low_defaults_allow_parallel_transfers_in_personal_deployment(self):
