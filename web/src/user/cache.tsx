@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import * as api from "../api";
-import { automaticCacheTasks, stopAutomaticCacheTask, diagnoseFileCache, removeCachedItems, type CacheDiagnosis, isCacheTaskGone, isFatalCacheError, loadPrivateCacheQueue, savePrivateCacheQueue, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, cacheDirectoryInfo, cacheQuota, regrantCacheDirectory, type CacheDirectoryInfo, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
+import { CACHE_STALLED_MESSAGE, isCacheStalled, automaticCacheTasks, stopAutomaticCacheTask, diagnoseFileCache, removeCachedItems, type CacheDiagnosis, isCacheTaskGone, isFatalCacheError, loadPrivateCacheQueue, savePrivateCacheQueue, startCacheGroup, beginFileCache, cachedFiles, cachedItems, cacheFileId, cacheIndex, cacheStats, cacheSupported, cancelFileCache, clearCache, listCacheGroup, cacheDirectoryInfo, cacheQuota, regrantCacheDirectory, type CacheDirectoryInfo, releaseCacheGroup, removeFileCache, stepFileCache, type CacheFile, type CachedFileState, type CachedItem, type CacheStats, type FileCacheState } from "../cache-client";
 import { BRAND } from "../brand";
 import { usePageSize } from "../pagination";
 import { effectiveMiB } from "../cache-store";
@@ -20,6 +20,10 @@ type FolderCacheJob = { id: string; prefixes: string[]; group?: string; status: 
 type Queue = {
   /** 浏览器支持且用户与管理员都没有关闭本机缓存；否则不显示缓存按钮与菜单项。 */
   available: boolean;
+  /** 本机缓存的设置是否已读到：读到之前不提示「已关闭」。 */
+  checked: boolean;
+  /** Worker 没有回复（浏览器存储暂时卡住）：与「已关闭」分开提示，并定时重试。 */
+  stalled: boolean;
   /** 私密文件可以缓存（这台设备开启了私密缓存且私密空间已解锁）。 */
   privateReady: boolean;
   /** 这台设备开启了私密缓存（不论是否解锁）：锁定时据此提示解锁后查看私密缓存。 */
@@ -121,6 +125,7 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
   // 同时缓存的文件（与 Worker 的 MAX_MANUAL_FILES 一致）；每个大文件在 Worker 内再按段并行下载。
   const active = useRef(new Map<string, AbortController>());
   const [available, setAvailable] = useState(false);
+  const [checked, setChecked] = useState(false), [stalled, setStalled] = useState(false);
   const watching = useRef(new Map<string, CacheFile[]>()), ready = useRef({ enabled, privateReady, available, privateCacheEnabled });
   ready.current = { enabled, privateReady, available, privateCacheEnabled };
   const prepareGroup = useCallback((paths: string[], id: string) => {
@@ -143,17 +148,24 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
   }, []);
   const refreshRef = useRef<() => void>(() => undefined);
   useEffect(() => {
-    if (!enabled || !cacheSupported()) { setAvailable(false); setPrivateCacheEnabled(false); return; }
-    let alive = true;
+    if (!enabled || !cacheSupported()) { setAvailable(false); setPrivateCacheEnabled(false); setChecked(true); setStalled(false); return; }
+    let alive = true, timer = 0;
     const read = () => void cacheStats().then(value => {
       if (!alive) return;
       setAvailable(value.settings.enabled);
       setPrivateCacheEnabled(value.settings.private);
+      setChecked(true); setStalled(false);
       if (!value.settings.enabled && storageKey) writeLocal(storageKey, "");
-    }).catch(() => undefined);
+    }).catch(reason => {
+      // 没有回复不等于关闭：保留上次读到的开关，提示暂时无法读取并在 15 秒后重试（不清空已保存的缓存任务）。
+      if (!alive || !isCacheStalled(reason)) return;
+      setStalled(true);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(read, 15_000);
+    });
     read();
     window.addEventListener("tessera:cache-changed", read);
-    return () => { alive = false; window.removeEventListener("tessera:cache-changed", read); };
+    return () => { alive = false; window.clearTimeout(timer); window.removeEventListener("tessera:cache-changed", read); };
   }, [enabled, storageKey]);
   // 本地缓存目录的授权在浏览器重启后可能需要重新确认：每次登录提示一次，点击提示中的按钮即可授权（需要用户点击）。
   useEffect(() => {
@@ -600,9 +612,9 @@ export function CacheTasksProvider({ enabled, owner, onOpenTasks, onActiveChange
   const activeCount = enabled ? visibleJobs.filter(isRunning).length + folders.filter(folder => folder.status === "active").length : 0;
   useEffect(() => { onActiveChange?.(activeCount); }, [activeCount, onActiveChange]);
   const visibleFolders = useMemo(() => enabled ? folders : [], [enabled, folders]);
-  const value: Queue = useMemo(() => ({ available, privateReady, privateEnabled: enabled && privateCacheEnabled, jobs: visibleJobs, folders: visibleFolders, enqueueFolders: startFolder, cancelFolder, retryFolder, states, cached, showTasks: onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pause: pauseJob, retry, removeJobs,
+  const value: Queue = useMemo(() => ({ available, checked, stalled, privateReady, privateEnabled: enabled && privateCacheEnabled, jobs: visibleJobs, folders: visibleFolders, enqueueFolders: startFolder, cancelFolder, retryFolder, states, cached, showTasks: onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pause: pauseJob, retry, removeJobs,
     clear: () => removeJobs(visibleJobs.filter(job => !isRunning(job)).map(job => job.id)), inspect: setDetails, remove: files => setRemoving(Array.isArray(files) ? files : [files]), removeFolders, forget, report }),
-  [available, privateReady, privateCacheEnabled, enabled, visibleJobs, visibleFolders, startFolder, cancelFolder, retryFolder, states, cached, onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pauseJob, retry, removeJobs, update, removeFolders, forget, report]);
+  [available, checked, stalled, privateReady, privateCacheEnabled, enabled, visibleJobs, visibleFolders, startFolder, cancelFolder, retryFolder, states, cached, onOpenTasks, watch, canCache, enqueue, enqueueMany, cancel, pauseJob, retry, removeJobs, update, removeFolders, forget, report]);
   const detailState = details && (states.get(cacheFileId(details)) ?? cached.get(cacheFileId(details)));
   const detailManual = Boolean(details && cached.get(cacheFileId(details))?.manual);
   const showDetails = enabled && details && (!api.isPrivatePath(details.key) || privateReady);
@@ -772,7 +784,8 @@ export function CachePage({ tab, onTabChange, onSettings, onOpenFolder }: { tab:
     ]} />
     {directory && directory.permission !== "granted" && <Notice tone="warning" icon="folder">缓存文件夹「{directory.name}」需要重新授权，授权前不会缓存新文件。
       <button type="button" className="link-button" onClick={() => void regrantCacheDirectory().then(result => { if (result !== "granted") toast.error("没有获得文件夹的读写权限"); })}>重新授权</button></Notice>}
-    {!queue.available && <Notice>本机缓存已关闭，或管理员未开放。可以在<button type="button" className="link-button" onClick={onSettings}>缓存设置</button>中开启。</Notice>}
+    {queue.stalled ? <Notice tone="warning">{CACHE_STALLED_MESSAGE}</Notice>
+      : queue.checked && !queue.available && <Notice>本机缓存已关闭，或管理员未开放。可以在<button type="button" className="link-button" onClick={onSettings}>缓存设置</button>中开启。</Notice>}
     {tab === "tasks" ? <CacheTaskList queue={queue} stats={stats} quota={quota} onSettings={onSettings} onOpenFolder={onOpenFolder} />
       : <CachedFileList privateReady={queue.privateReady} privateEnabled={queue.privateEnabled} stats={stats} quota={quota} onOpenFolder={onOpenFolder} onSettings={onSettings} />}
   </div>;

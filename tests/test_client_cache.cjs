@@ -127,3 +127,58 @@ test("本地连续读取共用目录句柄，换目录和撤权仍生效", async
   const next = cache.createBlockReader("namespace/n/entry", "dir");
   assert.equal(new TextDecoder().decode(await next(0)), "second/0", "新响应必须从当前目录读取");
 });
+
+// 浏览器存储整体卡住（如 Chrome 已下载更新、等待重启）时，打开数据库与文件夹访问都必须按期限放弃，
+// 统计、设置与读取改走替代路径，不能一直挂起。注入加速的 setTimeout，测试不必真等 3 秒。
+const fastTimers = (fn, ms) => setTimeout(fn, ms / 100);
+
+test("数据库打开卡住时按期限失败，下次重新打开，迟到的连接被关闭", async () => {
+  const requests = [];
+  let closed = 0;
+  const db = { close() { closed += 1; }, transaction() {
+    const tx = { objectStore() { return { get() { const r = { result: "value" }; queueMicrotask(() => { r.onsuccess(); setImmediate(() => tx.oncomplete()); }); return r; } }; } };
+    return tx;
+  } };
+  const indexedDB = { open() { const r = { result: db }; requests.push(r); return r; } };
+  const isolated = { exports: {} };
+  new Function("module", "exports", "indexedDB", "setTimeout", bundle.outputFiles[0].text)(isolated, isolated.exports, indexedDB, fastTimers);
+  await assert.rejects(isolated.exports.getMeta("settings"), /没有响应/);
+  requests[0].onsuccess();
+  assert.equal(closed, 1, "超时后才成功的连接要关闭");
+  const second = isolated.exports.getMeta("settings");
+  assert.equal(requests.length, 2, "超时不能被缓存，下次调用重新打开");
+  requests[1].onsuccess();
+  assert.equal(await second, "value");
+});
+
+test("文件夹授权查询或打开子文件夹卡住时视为暂不可用，不挂起", async () => {
+  const never = () => new Promise(() => undefined);
+  let mode = "permission";
+  const handle = {
+    queryPermission() { return mode === "permission" ? never() : Promise.resolve("granted"); },
+    getDirectoryHandle() { return never(); },
+  };
+  const db = { transaction() {
+    const tx = { objectStore() { return { get() { const r = { result: { handle, name: "cache", since: 1 } }; queueMicrotask(() => { r.onsuccess(); setImmediate(() => tx.oncomplete()); }); return r; } }; } };
+    return tx;
+  } };
+  const indexedDB = { open() { const r = { result: db }; queueMicrotask(() => r.onsuccess()); return r; } };
+  const isolated = { exports: {} };
+  new Function("module", "exports", "indexedDB", "setTimeout", bundle.outputFiles[0].text)(isolated, isolated.exports, indexedDB, fastTimers);
+  const cache = isolated.exports;
+  assert.equal(await cache.directoryPermission({ handle }), "prompt");
+  assert.equal(await cache.directoryRoot(), null);
+  assert.equal(await cache.preferredStore(), null, "目录暂不可用时不写入新块");
+  mode = "folder"; cache.forgetDirectory();
+  assert.equal(await cache.directoryPermission({ handle }), "granted");
+  assert.equal(await cache.directoryRoot(), null, "打开 tessera-cache 子文件夹卡住时同样按暂不可用处理");
+});
+
+test("within 超时使用兜底值，兜底抛错时拒绝而不是挂起", async () => {
+  const isolated = { exports: {} };
+  new Function("module", "exports", "setTimeout", bundle.outputFiles[0].text)(isolated, isolated.exports, fastTimers);
+  const { within } = isolated.exports, never = new Promise(() => undefined);
+  assert.equal(await within(never, 1000, () => "fallback"), "fallback");
+  assert.equal(await within(Promise.resolve("fast"), 1000, () => "fallback"), "fast");
+  await assert.rejects(within(never, 1000, () => { throw new Error("stalled"); }), /stalled/);
+});

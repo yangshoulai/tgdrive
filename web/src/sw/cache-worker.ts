@@ -7,7 +7,7 @@
 import {
   BLOCK, type AutomaticCacheTask, type Bytes, type DeviceSettings, type EntryInfo, type EntryRecord, type Kind, type Tier,
   aesKey, b64u, blockAad, createBlockReader, deleteEntries, deviceId, directoryRoot, effectiveMiB, ensureEntry, evict, forgetDirectory, getMeta, preferredStore, readDirectory, setMeta, sweepDirectory, fileCacheState, fromB64u, getEntry, hkdf, hmac,
-  kindOf, listEntries, missingRun, open, openInfo, parseRange, putBlock, readSettings, resolveRange, seal, sealInfo, servedType, setManualFlags, touchEntry, updateEntryInfo,
+  kindOf, listEntries, missingRun, open, openInfo, parseRange, putBlock, readSettings, resolveRange, seal, sealInfo, servedType, setManualFlags, STORAGE_STALL, touchEntry, updateEntryInfo, within,
 } from "../cache-store";
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
@@ -172,10 +172,13 @@ const sizeText = (bytes: number) => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).
 
 const tierBudget = (preferences: DeviceSettings, tier: Tier) => (tier === "n" ? preferences.maxMiB : preferences.privateMaxMiB) * MiB;
 
+/** 浏览器配额；接口卡住（如 Chrome 等待重启更新）时按未知处理：容量只按用户设置，配额检查交给写入时的 QuotaExceededError。 */
+const storageEstimate = () => within(navigator.storage?.estimate?.().catch(() => undefined) ?? Promise.resolve(undefined), STORAGE_STALL, () => undefined);
+
 /** 设备设置，容量按浏览器配额截断：设置值大于配额时以配额为准（配额每 5 秒随设置一起重读）；使用本地缓存目录时不截断。 */
 async function currentSettings() {
   if (!settings || Date.now() - settings.at > 5000) {
-    const [value, estimate, folder] = await Promise.all([readSettings(navigator.userAgent), navigator.storage?.estimate?.().catch(() => undefined), directoryRoot()]);
+    const [value, estimate, folder] = await Promise.all([readSettings(navigator.userAgent), storageEstimate(), directoryRoot()]);
     // 数据块写在用户选择的文件夹时不占浏览器配额，容量只按用户设置。
     const quota = folder ? undefined : estimate?.quota;
     settings = { value: { ...value, maxMiB: effectiveMiB(value.maxMiB, quota), privateMaxMiB: effectiveMiB(value.privateMaxMiB, quota) }, at: Date.now() };
@@ -1077,7 +1080,7 @@ async function startManual(owner: string, id: string, url: string, group?: strin
 
 /** 浏览器配额（整个站点共用）不够时，先移除这台设备上最久未使用的自动缓存（含其他账号与私密层），手动缓存不动；仍不够就请用户处理。 */
 async function reserveQuota(keep: string, need: number) {
-  const estimate = await navigator.storage?.estimate?.().catch(() => undefined);
+  const estimate = await storageEstimate();
   if (!estimate?.quota || estimate.usage === undefined) return;
   const shortfall = need - (estimate.quota - estimate.usage);
   if (shortfall <= 0) return;

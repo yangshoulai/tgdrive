@@ -3,7 +3,7 @@
  * 并给「本机缓存」设置页提供统计、设置与清理。页面本身不持有缓存密钥。
  */
 import * as api from "./api";
-import { type AutomaticCacheTask, type CacheDirectory, type DeviceSettings, type DirectoryPermission, type FileCacheState, type Kind, directoryPermission, forgetDirectory, readDirectory, readSettings, setMeta } from "./cache-store";
+import { type AutomaticCacheTask, type CacheDirectory, type DeviceSettings, type DirectoryPermission, type FileCacheState, type Kind, directoryPermission, forgetDirectory, readDirectory, readSettings, setMeta, STORAGE_STALL, within } from "./cache-store";
 export type CacheFile = Pick<api.FileItem, "key" | "etag" | "size" | "content_type">;
 export type { AutomaticCacheTask, FileCacheState } from "./cache-store";
 export const cacheFileId = (file: CacheFile) => `${api.isPrivatePath(file.key) ? "p" : "n"}:${file.etag}`;
@@ -25,6 +25,10 @@ export type CachedItemFilter = { private?: boolean; all?: boolean; prefix?: stri
 export const isFatalCacheError = (reason: unknown) => reason instanceof Error && (reason as Error & { fatal?: boolean }).fatal === true;
 /** 服务端已没有这个私密缓存任务（如服务重启）：重新登记任务组即可继续。 */
 export const isCacheTaskGone = (reason: unknown) => reason instanceof Error && (reason as Error & { gone?: boolean }).gone === true;
+
+/** Worker 在期限内没有回复：多半是浏览器存储暂时卡住（如 Chrome 已下载更新、等待重启），不是缓存被关闭。 */
+export const isCacheStalled = (reason: unknown) => reason instanceof Error && (reason as Error & { stalled?: boolean }).stalled === true;
+export const CACHE_STALLED_MESSAGE = "本机缓存暂时无法读取：浏览器存储没有响应，已缓存的文件暂时改从服务器读取。稍后会自动重试；一直如此时请完全退出并重新打开浏览器（Chrome 提示「重新启动即可完成更新」时先重新启动）。";
 
 export const cacheSupported = () => typeof window !== "undefined" && window.isSecureContext && "serviceWorker" in navigator
   && typeof indexedDB !== "undefined" && Boolean(globalThis.crypto?.subtle);
@@ -73,7 +77,7 @@ async function ask<T>(type: string, extra: Record<string, unknown> = {}, timeout
       if (error) reject(error); else resolve(value as T);
     };
     const abort = () => finish(new DOMException("缓存已取消", "AbortError"));
-    const expired = () => finish(new Error("本机缓存没有响应，请重试以继续缓存"));
+    const expired = () => finish(Object.assign(new Error("本机缓存没有响应，请重试以继续缓存"), { stalled: true }));
     let timer = setTimeout(expired, timeout);
     channel.port1.onmessage = event => {
       if (event.data?.progress) { clearTimeout(timer); timer = setTimeout(expired, timeout); progress?.(event.data.progress); return; }
@@ -105,7 +109,9 @@ export function startPreviewPrefetch(file: CacheFile) {
 }
 
 /** 只读统计（不解密条目），侧栏与设置页都可以频繁调用。 */
-export const cacheStats = () => ask<CacheStats>("tessera-cache:stats");
+export const cacheStats = () => ask<CacheStats>("tessera-cache:stats").catch((reason: unknown) => {
+  throw isCacheStalled(reason) ? Object.assign(new Error(CACHE_STALLED_MESSAGE), { stalled: true }) : reason;
+});
 /** 已缓存文件的分页列表；搜索、筛选与排序在 Worker 内完成，每页最多 200 项。 */
 export const cachedItems = (filter: CachedItemFilter) => ask<{ total: number; bytes: number; manual: number; complete: number; items: CachedItem[] }>("tessera-cache:items", { filter }, 30000);
 export async function removeCachedItems(filter: CachedItemFilter) {
@@ -179,9 +185,10 @@ export async function removeFileCache(file: CacheFile) { await ask("tessera-cach
 
 export async function storageEstimate(): Promise<{ usage: number; quota: number; persisted: boolean } | null> {
   try {
-    const estimate = await navigator.storage?.estimate?.();
+    // 浏览器存储卡住时 estimate 可能一直不返回：超时按未知处理，不能拖住设置页与本机缓存页。
+    const estimate = await within(navigator.storage?.estimate?.() ?? Promise.resolve(undefined), STORAGE_STALL, () => undefined);
     if (!estimate) return null;
-    return { usage: estimate.usage ?? 0, quota: estimate.quota ?? 0, persisted: Boolean(await navigator.storage.persisted?.()) };
+    return { usage: estimate.usage ?? 0, quota: estimate.quota ?? 0, persisted: Boolean(await within(navigator.storage.persisted?.() ?? Promise.resolve(false), STORAGE_STALL, () => false)) };
   } catch { return null; }
 }
 

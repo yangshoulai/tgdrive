@@ -1045,6 +1045,7 @@ export async function executeClientTool(name: string, args: Record<string, unkno
 /** 本机缓存查询（§26）：只回答服务端发来的文件；缓存索引在这台设备的浏览器里，服务端看不到。 */
 async function cacheStatus(args: Record<string, unknown>, queue: ReturnType<typeof useCacheQueue>): Promise<Record<string, unknown>> {
   if (!cacheSupported()) return { available: false, reason: "这个浏览器不能使用本机缓存：需要通过 https:// 地址访问并使用较新的浏览器，无痕模式下不可用" };
+  if (queue?.stalled) return { available: false, reason: "这台设备的本机缓存暂时无法读取（浏览器存储没有响应），稍后重试；一直如此时请完全退出并重新打开浏览器" };
   if (!queue?.available) return { available: false, reason: "这台设备的本机缓存已关闭（可在「设置 → 缓存设置」开启），或管理员不允许使用" };
   const stats = await cacheStats();
   const items = (Array.isArray(args.items) ? args.items : []) as (CacheFile & { path: string })[];

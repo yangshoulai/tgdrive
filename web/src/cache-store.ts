@@ -51,10 +51,23 @@ export const sizeChoices = (quota?: number | null) => {
 
 /* ---------- IndexedDB ---------- */
 
+/**
+ * 浏览器存储接口偶尔会整体卡住不回应（例如 Chrome 已下载更新、等待重启时）：调用方按 within 的期限放弃并改走替代路径
+ * （回源、按设置容量、视为文件夹暂不可用），不能让本机缓存的统计、设置与读取全部挂起。超时后迟到的结果直接丢弃。
+ */
+export const STORAGE_STALL = 3000;
+export const within = <T>(work: Promise<T>, ms: number, fallback: () => T): Promise<T> => new Promise<T>((resolve, reject) => {
+  const timer = setTimeout(() => { try { resolve(fallback()); } catch (error) { reject(error); } }, ms);
+  work.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+});
+const stalled = (what: string) => () => { throw new Error(`本机缓存暂时无法读取：浏览器${what}没有响应`); };
+
 let opening: Promise<IDBDatabase> | null = null;
 
 export function openDb(): Promise<IDBDatabase> {
-  opening ??= new Promise<IDBDatabase>((resolve, reject) => {
+  if (opening) return opening;
+  let late = false;
+  const pending = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, 1);
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -64,14 +77,20 @@ export function openDb(): Promise<IDBDatabase> {
     };
     request.onsuccess = () => {
       const db = request.result;
+      // 打开超时后才成功的连接已没有人使用，直接关闭，下次重新打开。
+      if (late) { db.close(); return; }
       // 另一个上下文升级数据库时主动让出连接，下次使用重新打开。
-      db.onversionchange = () => { db.close(); opening = null; };
+      db.onversionchange = () => { db.close(); if (opening === guarded) opening = null; };
       resolve(db);
     };
-    request.onerror = () => { opening = null; reject(request.error); };
-    request.onblocked = () => { opening = null; reject(new Error("本机缓存数据库被占用")); };
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error("本机缓存数据库被占用"));
   });
-  return opening;
+  const guarded: Promise<IDBDatabase> = within(pending, STORAGE_STALL, () => { late = true; return stalled("数据库")(); });
+  // 失败或超时不缓存，下次调用重新打开。
+  guarded.catch(() => { if (opening === guarded) opening = null; });
+  opening = guarded;
+  return guarded;
 }
 
 const done = <T>(request: IDBRequest<T>) => new Promise<T>((resolve, reject) => {
@@ -253,7 +272,9 @@ let rootMemo: { at: number; root: FileSystemDirectoryHandle | null } | null = nu
 export const directorySupported = () => typeof globalThis.FileSystemDirectoryHandle !== "undefined";
 export const readDirectory = () => getMeta<CacheDirectory>("directory").catch(() => undefined);
 export async function directoryPermission(directory?: CacheDirectory): Promise<DirectoryPermission> {
-  try { return (await (directory?.handle as PermissionHandle | undefined)?.queryPermission?.({ mode: "readwrite" })) as DirectoryPermission ?? "denied"; }
+  const query = (directory?.handle as PermissionHandle | undefined)?.queryPermission?.({ mode: "readwrite" });
+  // 查询卡住时按「需要重新确认」处理：条目保留、读取回源，不能让统计与读取一起挂起。
+  try { return (query ? await within(query as Promise<DirectoryPermission>, STORAGE_STALL, () => "prompt") : "denied") ?? "denied"; }
   catch { return "denied"; }
 }
 /** 选择或停用目录后让各上下文重新检查（Worker 内最多沿用 5 秒）。 */
@@ -265,7 +286,7 @@ export async function directoryRoot(): Promise<FileSystemDirectoryHandle | null>
   const directory = await readDirectory();
   let root: FileSystemDirectoryHandle | null = null;
   if (directory && await directoryPermission(directory) === "granted") {
-    try { root = await directory.handle.getDirectoryHandle(DIRECTORY_FOLDER, { create: true }); } catch { root = null; }
+    try { root = await within(directory.handle.getDirectoryHandle(DIRECTORY_FOLDER, { create: true }), STORAGE_STALL, () => null); } catch { root = null; }
   }
   rootMemo = { at: Date.now(), root };
   return root;
